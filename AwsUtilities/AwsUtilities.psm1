@@ -5,8 +5,8 @@ $script:CREATED_BY = "CreatedBy"
 $script:CAN_BE_DELETED = "CanBeDeleted"
 [System.Guid]$script:UNIQUE_ID = [System.Guid]::Parse("17701dbb-33ff-4f31-8914-6f48856fe755")
 
-#Make the variable $Regions available to all of the cmdlets
-Set-Variable -Name Regions -Value (@((Get-AWSRegion -GovCloudOnly | Select-Object -ExpandProperty Region), (Get-AWSRegion -IncludeChina | Select-Object -ExpandProperty Region)) | Select-Object -Unique)
+#Make the variable $AWSRegions available to all of the cmdlets
+Set-Variable -Name AWSRegions -Value (@((Get-AWSRegion -GovCloudOnly | Select-Object -ExpandProperty Region), (Get-AWSRegion -IncludeChina | Select-Object -ExpandProperty Region)) | Select-Object -Unique)
 
 Function Get-S3ETagCalculation {
 	<#
