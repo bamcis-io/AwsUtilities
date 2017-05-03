@@ -112,7 +112,7 @@ Function Get-S3ETagCalculation {
 		{
             Write-Verbose -Message "The upload is smaller than the minimum threshold and will not use multipart."
 
-			$Lines = 1
+			$Parts = 1
             #Here ComputeHash takes in a Stream object
 			$BinaryHashArray = $MD5.ComputeHash($FileReader)
 		}
@@ -491,7 +491,7 @@ Function New-EBSAutomatedSnapshot {
 									}
 
 									#Get snapshots that were created from the current volume, but are not the snapshot we just took
-									[Amazon.EC2.Model.Snapshot[]]$OldSnapshots = Get-EC2Snapshot -Filter (New-Object -TypeName Amazon.EC2.Model.Filter -Property @{Name = "volume-id"; Values = $Volume.VolumeId}) | Where {$_.SnapshotId -ne $Snapshot.SnapshotId}
+									[Amazon.EC2.Model.Snapshot[]]$OldSnapshots = Get-EC2Snapshot -Filter (New-Object -TypeName Amazon.EC2.Model.Filter -Property @{Name = "volume-id"; Values = $Volume.VolumeId}) | Where-Object {$_.SnapshotId -ne $Snapshot.SnapshotId}
             
 									foreach ($OldSnapshot in $OldSnapshots)
 									{
