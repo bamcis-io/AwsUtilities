@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.0.3
+Fixed a bug with Get-AWSProductInformation.
+
 ### 1.0.0.2
 Updated exported variable AWSRegions.
 

@@ -664,7 +664,7 @@ Function Get-AWSProductInformation {
 
 		[System.String[]]$Results = @()
 
-        $OfferIndex.offers | Get-Member -MemberType *Property | ForEach-Object {
+        $IndexFileContents.offers | Get-Member -MemberType *Property | ForEach-Object {
 			try 
 			{
 				$Results += "$BaseUrl$($IndexFileContents.offers | Select-Object -ExpandProperty $_.Name | Select-Object -ExpandProperty currentVersionUrl)"
