@@ -710,79 +710,96 @@ Function Get-AWSProductInformation {
 
 	Process
 	{
-		[System.String]$BaseUrl = "https://pricing.us-east-1.amazonaws.com"
+		[System.String]$private:BaseUrl = "https://pricing.us-east-1.amazonaws.com"
 
 		if ($PSCmdlet.ParameterSetName -eq "Url")
 		{			
-			[System.Net.WebClient]$WebClient = New-Object -TypeName System.Net.WebClient
-			[System.String]$Response = $WebClient.DownloadString($PSBoundParameters["Url"])
+			[System.Net.WebClient]$private:WebClient = New-Object -TypeName System.Net.WebClient
+			[System.String]$private:Response = $private:WebClient.DownloadString($PSBoundParameters["Url"])
 		}
 		elseif ($PSCmdlet.ParameterSetName -eq "Product")
 		{
-			[System.Net.WebClient]$WebClient = New-Object -TypeName System.Net.WebClient
-			[System.String]$Response = $WebClient.DownloadString($OfferIndexUrl)
+			[System.Net.WebClient]$private:WebClient = New-Object -TypeName System.Net.WebClient
+			[System.String]$private:Response = $private:WebClient.DownloadString($OfferIndexUrl)
 
-			$IndexFileContents = ConvertFrom-Json -InputObject $Response
+			$private:IndexFileContents = ConvertFrom-Json -InputObject $private:Response
 
-			$Url = "$private:BaseUrl$($IndexFileContents.offers | Select-Object -ExpandProperty $PSBoundParameters["Product"] | Select-Object -ExpandProperty currentVersionUrl)"
-            [System.Net.WebClient]$WebClient = New-Object -TypeName System.Net.WebClient
-			[System.String]$Response = $WebClient.DownloadString($Url)
+			$private:Url = "$private:BaseUrl$($private:IndexFileContents.offers | Select-Object -ExpandProperty $PSBoundParameters["Product"] | Select-Object -ExpandProperty currentVersionUrl)"
+            [System.Net.WebClient]$private:WebClient = New-Object -TypeName System.Net.WebClient
+			[System.String]$private:Response = $WebClient.DownloadString($private:Url)
 		}
 		else
 		{
-			$Response = Get-Content -Path $Path -Raw
+			$private:Response = Get-Content -Path $Path -Raw
 		}
 
-		$Obj = ConvertFrom-Json -InputObject $Response
+		<#
+			The converted Obj object will look like the following:
 
-		$Results = @()
+			formatVersion   : v1.0
+			disclaimer      : This pricing list is for informational purposes only. All prices are subject to the additional terms included in the pricing pages on http://aws.amazon.com. All Free Tier 
+							  prices are also subject to the terms included at https://aws.amazon.com/free/
+			offerCode       : AmazonElastiCache
+			version         : 20170419194925
+			publicationDate : 2017-04-19T19:49:25Z
+			products        : @{HBRQZSXXSY2DXJ77=; 3Y8QARGM5NXC9EBW=; ... }
+			terms           : @{OnDemand=; Reserved=}
+		#>
+		$private:ConvertedResponse = ConvertFrom-Json -InputObject $private:Response
 
-		#Expanding the products property gets us a single object with member like
+		[PSCustomObject[]]$private:Results = @()
+
+		#Expanding the products property gets us a single object with members like
 		#RBW79EQZWRSDB85D : @{sku=RBW79EQZWRSDB85D; productFamily=Database Instance; attributes=}
 		#W3PUKFKG7RDK3KA5 : @{sku=W3PUKFKG7RDK3KA5; productFamily=Data Transfer; attributes=}
 		
 		#We want to expand the property of the products object for each sku to access the hash table that has the data
-		#The only way to do this is to use an extra foreach
-		$Products = $Obj | Select-Object -ExpandProperty products 
+		<#
+			Products will look like
+			8W42JWEZE64YAUET : @{sku=8W42JWEZE64YAUET; productFamily=Cache Instance; attributes=}
+			T64VHYZ5FZP9JDEC : @{sku=T64VHYZ5FZP9JDEC; productFamily=Cache Instance; attributes=}
+		#>
+		[PSCustomObject]$private:Products = $private:ConvertedResponse | Select-Object -ExpandProperty products 
 
 		#Getting the members of Products will get us all of the sku properties, we want to iterate each
 		#one and select it, expanded from the products object, which will provide the hash table of data
 		#which includes sku, productFamily, and attributes
-		Get-Member -InputObject $Products -MemberType NoteProperty | ForEach-Object {
-			#The Get-Member results will have a name property, that is the sku data for each product
-			$Val = $Products | Select-Object -ExpandProperty $_.Name
+		Get-Member -InputObject $private:Products -MemberType *Property | ForEach-Object {
+			
+            #The Get-Member results will have a name property, that is the sku data for each product
+			#By expanding the name property, we get the values of the sku index, which are the properties
+			#like attributes and productfamily
+			[PSCustomObject]$private:ProductData = $private:Products | Select-Object -ExpandProperty $_.Name
+
+            [System.Collections.Hashtable]$private:TempHashTable = @{}
+            
+            #Convert the PSCustomObject to a hash table
+            $private:ProductData.attributes.psobject.Properties | ForEach-Object  {
+                $private:TempHashTable[$_.Name] = $_.Value
+            }
 
 			#Assume the product matches the filters, and prove it false
-			$Matches = $true
+			$private:Matches = $true
 
 			#Now that we have product object, we can filter based on the key value pairs provided
 			foreach ($Key in $Attributes.Keys)
 			{
-				#Make sure the product has the attribute
-				if ($Key -in (Get-Member -InputObject $Val.attributes -MemberType NoteProperty | Select-Object -ExpandProperty Name))
-				{
-					#Access the property through Select-Object since the name is dynamic and we can't use a "dot" propertyname technique
-					#If the property value doesn't match the filter, set Matches to $false
-					if (($Val.attributes | Select-Object -ExpandProperty $Key) -notlike $Attributes[$Key])
-					{
-						$Matches = $false
-						break
-					}
-				}
-				else
-				{
-					$Matches = $false
-					break
-				}
+                #If the hash table doesn't contain the key and the values are not alike, it doesn't match
+                #Otherwise, keep going
+                if (-not ($private:TempHashTable.ContainsKey($Key) -and $private:TempHashTable[$Key] -like $Attributes[$Key]))
+                {                    
+                    $private:Matches = $false
+                    break                    
+                }
 			}
 
-			if ($Matches -eq $true)
+			if ($private:Matches -eq $true)
 			{
-				$Results += $Val
+                $private:Results += [PSCustomObject]@{"Sku" = $private:ProductData.sku; "ProductFamily" = $private:ProductData.productFamily; "Attributes" = $TempHashTable}
 			}
 		}
 
-		Write-Output -InputObject $Results
+		Write-Output -InputObject $private:Results
 	}
 
 	End {		

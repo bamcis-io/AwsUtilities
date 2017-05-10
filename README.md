@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.0.4
+Updated Get-AWSProductInformation so the output is more useable.
+
 ### 1.0.0.3
 Fixed a bug with Get-AWSProductInformation.
 
