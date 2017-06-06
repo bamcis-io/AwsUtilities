@@ -1147,11 +1147,6 @@ Function New-AWSSplat {
 		.PARAMETER DefaultRegion
 			The default region to use if one hasn't been set and can be retrieved through Get-AWSDefaultRegion. This defaults to us-east-1.
 
-				.EXAMPLE
-			Copy-EBSVolume -SourceInstanceName server1 -DestinationInstanceName server2 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
-			
-			Copies the EBS volume(s) from server1 in us-west-2 and attaches them to server2 in us-east-2. 
-
 		.EXAMPLE
 			New-AWSSplat -Region ([Amazon.RegionEndpoint]::USEast1) -ProfileName myprodaccount
 
@@ -1264,6 +1259,180 @@ Function New-AWSSplat {
 	}
 }
 
+Function New-AWSUtilitiesSplat {
+	<#
+		.SYNOPSIS
+			Builds a hashtable that can be used as a splat for default AWS parameters.
+
+		.DESCRIPTION
+			Creates a hashtable that contains the common AWS Parameters for authentication and location. This collection can then be used as a splat against AWS Utilities PowerShell cmdlets.
+
+			The major difference is that AWS PowerShell cmdlets take a string for the region parameter, and these cmdlets use the Amazon.RegionEndpoint object for the region parameter.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.PARAMETER DefaultRegion
+			The default region to use if one hasn't been set and can be retrieved through Get-AWSDefaultRegion. This defaults to us-east-1.
+
+		.EXAMPLE
+			New-AWSUtilitiesSplat -Region ([Amazon.RegionEndpoint]::USEast1) -ProfileName myprodaccount
+
+			Creates a splat for us-east-1 using credentials stored in the myprodaccount profile.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			None
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 4/15/2107
+	#>
+	[CmdletBinding(DefaultParameterSetName="Specify")]
+	Param(
+		[Parameter(ParameterSetName="Specify")]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter(ParameterSetName="Specify")]
+        [ValidateNotNull()]
+        [System.String]$ProfileName,
+
+        [Parameter(ParameterSetName="Specify")]
+		[ValidateNotNull()]
+        [System.String]$AccessKey,
+
+        [Parameter(ParameterSetName="Specify")]
+        [ValidateNotNull()]
+        [System.String]$SecretKey,
+
+        [Parameter(ParameterSetName="Specify")]
+        [ValidateNotNull()]
+        [System.String]$SessionToken,
+
+        [Parameter(ParameterSetName="Specify")]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter(ParameterSetName="Specify")]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [System.String]$DefaultRegion = "us-east-1",
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.Collections.Hashtable]$AWSSplat
+	)
+
+	Begin {
+	}
+
+	Process {
+		#Map the common AWS parameters
+        $CommonSplat = @{}
+
+		if ($PSCmdlet.ParameterSetName -eq "Specify")
+		{
+			if ($PSBoundParameters.ContainsKey("Region"))
+			{
+				[Amazon.RegionEndpoint]$CommonSplat.Region = $Region
+			}
+			else
+			{
+				[System.String]$RegionTemp = Get-DefaultAWSRegion | Select-Object -ExpandProperty Region
+
+				if (-not [System.String]::IsNullOrEmpty($RegionTemp))
+				{
+					#Get-DefaultAWSRegions returns a Amazon.Powershell.Common.AWSRegion object
+ 					[Amazon.RegionEndpoint]$CommonSplat.Region = [Amazon.RegionEndpoint]::GetBySystemName($RegionTemp)
+				}
+				else
+				{
+					#No default region set
+					[Amazon.RegionEndpoint]$CommonSplat.Region = [Amazon.RegionEndpoint]::GetBySystemName($DefaultRegion)
+				}
+			}
+
+			if ($PSBoundParameters.ContainsKey("SecretKey"))
+			{
+				$CommonSplat.SecretKey = $SecretKey
+			}
+
+			if ($PSBoundParameters.ContainsKey("AccessKey"))
+			{
+				$CommonSplat.AccessKey = $AccessKey
+			}
+
+			if ($PSBoundParameters.ContainsKey("SessionToken"))
+			{
+				$CommonSplat.SessionToken = $SessionToken
+			}
+
+			if ($PSBoundParameters.ContainsKey("ProfileName"))
+			{
+				$CommonSplat.ProfileName = $ProfileName
+			}
+
+			if ($PSBoundParameters.ContainsKey("ProfileLocation"))
+			{
+				$CommonSplat.ProfileLocation = $ProfileLocation
+			}
+
+			if ($PSBoundParameters.ContainsKey("Credential") -and $Credential -ne $null)
+			{
+				$CommonSplat.Credential = $Credential
+			}
+		}
+		else
+		{
+			foreach ($Key in $AWSSplat.GetEnumerator())
+			{
+				if ($Key.Name -eq "Region")
+				{
+					$CommonSplat.Region = [Amazon.RegionEndpoint]::GetBySystemName($Key.Value)
+				}
+				else
+				{
+					$CommonSplat."$($Key.Name)" = $Key.Value
+				}
+			}
+		}
+
+		Write-Output -InputObject $CommonSplat
+	}
+
+	End {
+	}
+}
+
 Function Copy-EBSVolume {
     <#
         .SYNOPSIS
@@ -1363,7 +1532,7 @@ Function Copy-EBSVolume {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 4/15/2107
+			LAST UPDATE: 4/15/2017
     #>
 
     [CmdletBinding(DefaultParameterSetName = "DestinationByIdSourceByInstanceId")]
@@ -1452,7 +1621,8 @@ Function Copy-EBSVolume {
     Process {
 		#Map the common AWS parameters
 		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		
+		[System.Collections.Hashtable]$SourceAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
+
 		if (-not $PSBoundParameters.ContainsKey("Region"))
 		{
 			$Region = [Amazon.RegionEndpoint]::GetBySystemName($SourceSplat.Region)
@@ -1460,12 +1630,14 @@ Function Copy-EBSVolume {
 		
 		#Map the common parameters, but with the destination Region
 		[System.Collections.Hashtable]$DestinationSplat = New-AWSSplat -Region $DestinationRegion -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation
-		
+		[System.Collections.Hashtable]$DestinationAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $DestinationSplat
+
 		#If the user did not specify a destination region, use the source region
 		#which could be specified, or be the default
 		if (-not $PSBoundParameters.ContainsKey("DestinationRegion"))
 		{
 			$DestinationSplat.Region = $SourceSplat.Region
+			$DestinationAWSUtilitiesSplat.Region = $SourceAWSUtilitiesSplat.Region
 			$DestinationRegion = [Amazon.RegionEndpoint]::GetBySystemName($DestinationSplat.Region)
 		}
 
@@ -1475,89 +1647,55 @@ Function Copy-EBSVolume {
         switch -Wildcard ($PSCmdlet.ParameterSetName) {
             "*SourceByInstanceName" {
 
-                [Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
+				[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId -Name $SourceInstanceName @SourceAWSUtilitiesSplat
 
-				#Filtering on tag values uses the "tag:" preface for the key name
-                $Filter.Name = "tag:Name"
-                $Filter.Value = $SourceInstanceName
-                
-                #This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
-                #so save the error output and don't strongly type it
-                $Instances = Get-EC2Instance -Filter @($Filter) @SourceSplat -ErrorAction SilentlyContinue
+				if ($Instance -ne $null)
+				{
+					#Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
+					{
+						$AvailabilityZone = $Instance.Placement.AvailabilityZone
+						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
+					}
 
-                if ($Instances -ne $null)
-                {
-                    [Amazon.EC2.Model.Instance]$Instance = $Instances.Instances | Select-Object -First 1
+					if ($OnlyRootDevice)
+					{
+						$EBSVolumeIds = $Instance.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | Select-Object -First 1 -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
+					}
+					else
+					{
+						$EBSVolumeIds = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
+					}                        
+				}
 
-                    if ($Instance -ne $null)
-                    {
-						#Only update the AZ if a specific one wasn't specified and we're not moving cross region
-						if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
-						{
-							$AvailabilityZone = $Instance.Placement.AvailabilityZone
-							Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
-						}
-
-                        if ($OnlyRootDevice)
-                        {
-                            $EBSVolumeIds = $Instance.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | Select-Object -First 1 -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
-                        }
-                        else
-                        {
-                            $EBSVolumeIds = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
-                        }                        
-                    }
-                    else
-                    {
-                        throw "[ERROR] Could not find a matching EC2 instance."
-                    }
-                }
-                else
-                {
-                    throw "[ERROR] Nothing was returned by the get instance request."
-                }
-                
                 break
             }
             "*SourceByInstanceId" {
                 
                 #This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
                 #so save the error output and don't strongly type it
-                $Instances = Get-EC2Instance -InstanceId $SourceInstanceId @SourceSplat -ErrorAction SilentlyContinue
+                [Amazon.EC2.Model.Instance]$Instance  = Get-EC2InstanceByNameOrId -InstanceId $SourceInstanceId @SourceAWSUtilitiesSplat
 
-                if ($Instances -ne $null)
+                if ($Instance -ne $null)
                 {
-                    [Amazon.EC2.Model.Instance]$Instance = $Instances.Instances | Select-Object -First 1
+					#Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
+					{
+						$AvailabilityZone = $Instance.Placement.AvailabilityZone
+						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
+					}
 
-                    if ($Instance -ne $null)
+                    if ($OnlyRootDevice)
                     {
-						#Only update the AZ if a specific one wasn't specified and we're not moving cross region
-						if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
-						{
-							$AvailabilityZone = $Instance.Placement.AvailabilityZone
-							Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
-						}
-
-                        if ($OnlyRootDevice)
-                        {
-                            $EBSVolumeIds = $Instance.BlockDeviceMappings | `
-												Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | `
-												Select-Object -ExpandProperty Ebs | `
-												Select-Object -First 1 -ExpandProperty VolumeId
-                        }
-                        else
-                        {
-                            $EBSVolumeIds = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
-                        }                       
+						$EBSVolumeIds = $Instance.BlockDeviceMappings | `
+							Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | `
+							Select-Object -ExpandProperty Ebs | `
+							Select-Object -First 1 -ExpandProperty VolumeId
                     }
                     else
                     {
-                        throw -Message "[ERROR] Could not find a matching EC2 instance."
-                    }
-                }
-                else
-                {
-                    throw -Message "[ERROR] Nothing was returned by the get instance request."
+                        $EBSVolumeIds = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
+                    }                       
                 }
 
                 break
@@ -1598,17 +1736,13 @@ Function Copy-EBSVolume {
         switch -Wildcard ($PSCmdlet.ParameterSetName)
         {
             "DestinationByName*" {
-                [Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
-                $Filter.Name = "tag:Name"
-                $Filter.Value = $DestinationInstanceName
-                
-                $Destination = Get-EC2Instance -Filter @($Filter) @DestinationSplat | Select-Object -ExpandProperty Instances | Select-Object -First 1
+				$Destination = Get-EC2InstanceByNameOrId -Name $SourceInstanceName @DestinationAWSUtilitiesSplat
 				$AvailabilityZone = $Destination.Placement.AvailabilityZone
 
                 break
             }
             "DestinationById*" {
-                $Destination = Get-EC2Instance -InstanceId $DestinationInstaceId @DestinationSplat | Select-Object -ExpandProperty Instances | Select-Object -First 1
+                $Destination = Get-EC2InstanceByNameOrId -InstanceId $DestinationInstaceId @DestinationAWSUtilitiesSplat
 				$AvailabilityZone = $Destination.Placement.AvailabilityZone
 
                 break
@@ -1780,48 +1914,7 @@ Function Copy-EBSVolume {
 			#Check if a destination instance was specified
 			if ($Destination -ne $null)
 			{
-				[System.String]$DeviceBase = "xvd"
-
-				#If you map an EBS volume with the name xvda, Windows does not recognize the volume.
-				[System.Int32]$CurrentLetter = [System.Int32][System.Char]'b'
-
-				[System.String[]]$Devices = $Destination.BlockDeviceMappings | Select-Object -ExpandProperty DeviceName
-
-				#Iterate all of the new volumes and attach them
-				foreach ($Item in $NewVolumes)
-				{
-					try
-					{
-						#Try to find an available device
-						while ($Devices.Contains($DeviceBase + [System.Char]$CurrentLetter) -and [System.Char]$CurrentLetter -ne 'p')
-						{
-							$CurrentLetter++
-						}
-
-						#The last usable letter is p
-						if ([System.Char]$CurrentLetter -ne 'q')
-						{
-							Write-Verbose -Message "Attaching $($Item.VolumeId) to $($Destination.InstanceId) at device $DeviceBase$([System.Char]$CurrentLetter)"
-                        
-							#The cmdlet will create the volume as the same size as the snapshot
-							[Amazon.EC2.Model.VolumeAttachment]$Attachment = Add-EC2Volume -InstanceId $Destination.InstanceId -VolumeId $Item.VolumeId -Device ($DeviceBase + [System.String][System.Char]$CurrentLetter) @DestinationSplat
-							Write-Verbose -Message "Attached at $($Attachment.AttachTime)"
-                    
-							#Increment the letter so the next check doesn't try to use the same device
-							$CurrentLetter++
-						}
-						else
-						{
-							#Break out of the iteration because we can't mount any more drives
-							Write-Warning -Message "No available devices left to mount the device"
-							break
-						}
-					}
-					catch [Exception]
-					{
-						Write-Warning -Message "[ERROR] Could not attach volume $($Item.VolumeId) with error $($_.Exception.Message)"
-					}
-				}
+				Mount-EBSVolumes -VolumeIds $NewVolumes -NextAvailableDevice -Instance $Destination @DestinationAWSUtilitiesSplat
 			}
 			elseif ($PSCmdlet.ParameterSetName -like ("DestinationBy*"))
 			{
@@ -1854,4 +1947,292 @@ Function Copy-EBSVolume {
 
     End {
     }
+}
+
+Function Mount-EBSVolumes {
+	<#
+		.SYNOPSIS
+			Mounts a set of available EBS volumes to an instance.
+
+		.DESCRIPTION
+			The cmdlet can mount one to many available EBS volumes to an EC2 instance. The destination instance
+			can be provided as an EC2 object or by instance id. The mount point device can be specified directly
+			or the next available device is used. If the device is specified directly and is in use, or if multiple
+			volumes are specified, the provided device is used as a starting point to find the next available device.
+
+		.PARAMETER VolumeIds
+			The Ids of the volumes to attach. The must be in an available status.
+
+		.PARAMETER NextAvailableDevice
+			Specifies that the cmdlet will find the next available device between xvdb and xvdp.
+
+		.PARAMETER Device
+			Specify the device that the volume will be attached at. If multiple volumes are specified, this is the starting
+			point to find the next available device for each.
+
+		.PARAMETER InstanceId
+			The id of the instance to attach the volumes to.
+
+		.PARAMETER Instance
+			The Amazon.EC2.Model.Instance object to attach the volumes to.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Mount-EBSVolumes -VolumeIds vol-04d16ab9a1b07449g -InstanceId i-057bd4fe22eced7bb -Region ([Amazon.RegionEndpoint]::USWest1)
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			None
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/5/2017
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
+		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
+		[ValidateNotNull()]
+		[System.String[]]$VolumeIds,
+
+		[Parameter(ParameterSetName = "InputObjectAndNextAvailable", Mandatory = $true)]
+		[Parameter(ParameterSetName = "IdAndNextAvailable", Mandatory = $true)]
+		[switch]$NextAvailableDevice,
+
+		[Parameter(ParameterSetName = "InputObjectAndDevice", Mandatory = $true)]
+		[Parameter(ParameterSetName = "IdAndDevice", Mandatory = $true)]
+		[ValidateSet("xvdb", "xvdc", "xvdd", "xvde", "xvdf", "xvdg", "xvdh", "xvdi", "xvdj",
+			"xvdk", "xvdl", "xvdm", "xvdn", "xvdo", "xvdp", "xvdq")]
+		[System.String]$Device,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndDevice")]
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceId,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndDevice")]
+		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
+		[Amazon.EC2.Model.Instance]$Instance,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)		
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		if ($PSCmdlet.ParameterSetName.StartsWith("Id"))
+		{
+			$Destination = Get-EC2Instance -InstanceId $InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
+		}
+
+		[System.String]$DeviceBase = "xvd"
+		[System.Int32]$CurrentLetter = 0
+
+		if ($NextAvailableDevice)
+		{
+			#If you map an EBS volume with the name xvda, Windows does not recognize the volume.
+			$CurrentLetter = [System.Int32][System.Char]'b'
+		}
+		else
+		{
+			$CurrentLetter = [System.Int32][System.Char]$Device.Substring($Device.Length - 1)
+		}
+
+		#Iterate all of the new volumes and attach them
+		foreach ($Item in $VolumeIds)
+		{
+			try
+			{
+				$Destination = Get-EC2Instance -InstanceId $Destination.InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
+				[System.String[]]$Devices = $Destination.BlockDeviceMappings | Select-Object -ExpandProperty DeviceName
+
+				#Try to find an available device
+				while ($Devices.Contains($DeviceBase + [System.Char]$CurrentLetter) -and [System.Char]$CurrentLetter -ne 'q')
+				{
+					$CurrentLetter++
+				}
+
+				#The last usable letter is p
+				if ([System.Char]$CurrentLetter -ne 'q')
+				{
+					Write-Verbose -Message "Attaching $Item to $($Destination.InstanceId) at device $DeviceBase$([System.Char]$CurrentLetter)"
+                        
+					#The cmdlet will create the volume as the same size as the snapshot
+					[Amazon.EC2.Model.VolumeAttachment]$Attachment = Add-EC2Volume -InstanceId $Destination.InstanceId -VolumeId $Item -Device ($DeviceBase + [System.String][System.Char]$CurrentLetter) @Splat
+					Write-Verbose -Message "Attached at $($Attachment.AttachTime)"
+                    
+					#Increment the letter so the next check doesn't try to use the same device
+					$CurrentLetter++
+				}
+				else
+				{
+					#Break out of the iteration because we can't mount any more drives
+					Write-Warning -Message "No available devices left to mount the device"
+					break
+				}
+			}
+			catch [Exception]
+			{
+				Write-Warning -Message "[ERROR] Could not attach volume $($Item.VolumeId) with error $($_.Exception.Message)"
+			}
+		}
+	}
+
+	End {
+	}
+}
+
+Function Get-EC2InstanceByNameOrId {
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
+		[System.String]$InstanceId,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
+		[System.String]$Name,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		[Amazon.EC2.Model.Instance]$EC2 = $null
+
+		if ($PSCmdlet.ParameterSetName -eq "Id")
+		{
+			$Instances = Get-EC2Instance -InstanceId $InstanceId -ErrorAction SilentlyContinue @Splat
+		}
+		else
+		{
+			[Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
+
+			#Filtering on tag values uses the "tag:" preface for the key name
+			$Filter.Name = "tag:Name"
+			$Filter.Value = $Name
+                
+			#This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
+			#so save the error output and don't strongly type it
+			$Instances = Get-EC2Instance -Filter @($Filter) -ErrorAction SilentlyContinue @Splat
+		}
+
+		if ($Instances -ne $null)
+		{
+			if ($Instances.Instances.Count -gt 0)
+			{
+				if ($Instances.Instances.Count -eq 1)
+				{
+					$EC2 = $Instances.Instances | Select-Object -First 1
+
+					if ($EC2 -eq $null)
+					{
+						throw "No matching instances found."
+					}
+				}
+				else
+				{
+					throw "Ambiguous match, more than 1 EC2 instance with the name $Name found. Try instance id instead."
+				}
+			}
+			else
+			{
+				throw "No matching instances found."
+			}
+		}
+		else
+		{
+			throw "Nothing was returned by the get instance request."
+		}
+
+		Write-Output -InputObject $EC2
+	}
+
+	End {
+	}
 }
