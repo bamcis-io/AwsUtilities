@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.0.7
+Fixed minor bugs on mounting volumes with Copy-EBSVolume.
+
 ### 1.0.0.6
 Added the New-AWSUtilitiesSplat cmdlet to be used with the cmdlets in the module and fixed a bug the previous version introduced with the splats.
 

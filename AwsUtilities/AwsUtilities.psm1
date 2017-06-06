@@ -1914,7 +1914,8 @@ Function Copy-EBSVolume {
 			#Check if a destination instance was specified
 			if ($Destination -ne $null)
 			{
-				Mount-EBSVolumes -VolumeIds $NewVolumes -NextAvailableDevice -Instance $Destination @DestinationAWSUtilitiesSplat
+				Write-Verbose -Message "Mounting volumes."
+				Mount-EBSVolumes -VolumeIds ($NewVolumes | Select-Object -ExpandProperty VolumeId) -NextAvailableDevice -Instance $Destination @DestinationAWSUtilitiesSplat
 			}
 			elseif ($PSCmdlet.ParameterSetName -like ("DestinationBy*"))
 			{
