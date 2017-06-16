@@ -4,6 +4,8 @@ Initialize-AWSDefaults
 $script:CREATED_BY = "CreatedBy"
 $script:CAN_BE_DELETED = "CanBeDeleted"
 [System.Guid]$script:UNIQUE_ID = [System.Guid]::Parse("17701dbb-33ff-4f31-8914-6f48856fe755")
+$script:INTEL_DRIVER = "Intel82599VF"
+$script:ENA = "ENA"
 
 #Make the variable $AWSRegions available to all of the cmdlets
 Set-Variable -Name AWSRegions -Value (@((Get-AWSRegion -GovCloudOnly | Select-Object -ExpandProperty Region), (Get-AWSRegion -IncludeChina | Select-Object -ExpandProperty Region)) | Select-Object -Unique)
@@ -314,7 +316,7 @@ Function New-EBSAutomatedSnapshot {
 			Specifies that the snapshots that are created should not be automatically deleted. If this is specified, you cannot specify a retention period.
 
 		.PARAMETER EnableLogging
-			Enables writing a log file to %SYSTEMDRIVE%\AwsLogs\EBS\Backup.log with the transcript of the backup job. The log file is automatically rolled over when it exceeds 5MB.
+			Enables writing a log file to c:\AwsLogs\EBS\Backup.log with the transcript of the backup job. The log file is automatically rolled over when it exceeds 5MB.
 
 		.EXAMPLE
 			New-AutomatedEBSSnapshot -RetentionPeriod (New-TimeSpan -Days 45)
@@ -1222,27 +1224,27 @@ Function New-AWSSplat {
             }
 		}
 
-        if ($PSBoundParameters.ContainsKey("SecretKey"))
+        if ($PSBoundParameters.ContainsKey("SecretKey") -and -not [System.String]::IsNullOrEmpty($SecretKey))
         {
             $CommonSplat.SecretKey = $SecretKey
         }
 
-        if ($PSBoundParameters.ContainsKey("AccessKey"))
+        if ($PSBoundParameters.ContainsKey("AccessKey") -and -not [System.String]::IsNullOrEmpty($AccessKey))
         {
             $CommonSplat.AccessKey = $AccessKey
         }
 
-        if ($PSBoundParameters.ContainsKey("SessionToken"))
+        if ($PSBoundParameters.ContainsKey("SessionToken") -and -not [System.String]::IsNullOrEmpty($SessionToken))
         {
             $CommonSplat.SessionToken = $SessionToken
         }
 
-        if ($PSBoundParameters.ContainsKey("ProfileName"))
+        if ($PSBoundParameters.ContainsKey("ProfileName") -and -not [System.String]::IsNullOrEmpty($ProfileName))
         {
             $CommonSplat.ProfileName = $ProfileName
         }
 
-        if ($PSBoundParameters.ContainsKey("ProfileLocation"))
+        if ($PSBoundParameters.ContainsKey("ProfileLocation") -and -not [System.String]::IsNullOrEmpty($ProfileLocation))
         {
             $CommonSplat.ProfileLocation = $ProfileLocation
         }
@@ -1337,6 +1339,7 @@ Function New-AWSUtilitiesSplat {
         [System.String]$SessionToken,
 
         [Parameter(ParameterSetName="Specify")]
+		[ValidateNotNull()]
         [Amazon.Runtime.AWSCredentials]$Credential,
 
         [Parameter(ParameterSetName="Specify")]
@@ -1347,7 +1350,7 @@ Function New-AWSUtilitiesSplat {
         [ValidateNotNullOrEmpty()]
         [System.String]$DefaultRegion = "us-east-1",
 
-		[Parameter()]
+		[Parameter(ParameterSetName = "Splat")]
 		[ValidateNotNull()]
 		[System.Collections.Hashtable]$AWSSplat
 	)
@@ -1357,11 +1360,11 @@ Function New-AWSUtilitiesSplat {
 
 	Process {
 		#Map the common AWS parameters
-        $CommonSplat = @{}
+        [System.Collections.Hashtable]$CommonSplat = @{}
 
 		if ($PSCmdlet.ParameterSetName -eq "Specify")
 		{
-			if ($PSBoundParameters.ContainsKey("Region"))
+			if ($PSBoundParameters.ContainsKey("Region") -or $Region -ne $null)
 			{
 				[Amazon.RegionEndpoint]$CommonSplat.Region = $Region
 			}
@@ -1381,27 +1384,27 @@ Function New-AWSUtilitiesSplat {
 				}
 			}
 
-			if ($PSBoundParameters.ContainsKey("SecretKey"))
+			if ($PSBoundParameters.ContainsKey("SecretKey") -and -not [System.String]::IsNullOrEmpty($SecretKey))
 			{
 				$CommonSplat.SecretKey = $SecretKey
 			}
 
-			if ($PSBoundParameters.ContainsKey("AccessKey"))
+			if ($PSBoundParameters.ContainsKey("AccessKey") -and -not [System.String]::IsNullOrEmpty($AccessKey))
 			{
 				$CommonSplat.AccessKey = $AccessKey
 			}
 
-			if ($PSBoundParameters.ContainsKey("SessionToken"))
+			if ($PSBoundParameters.ContainsKey("SessionToken") -and -not [System.String]::IsNullOrEmpty($SessionToken))
 			{
 				$CommonSplat.SessionToken = $SessionToken
 			}
 
-			if ($PSBoundParameters.ContainsKey("ProfileName"))
+			if ($PSBoundParameters.ContainsKey("ProfileName") -and -not [System.String]::IsNullOrEmpty($ProfileName))
 			{
 				$CommonSplat.ProfileName = $ProfileName
 			}
 
-			if ($PSBoundParameters.ContainsKey("ProfileLocation"))
+			if ($PSBoundParameters.ContainsKey("ProfileLocation") -and -not [System.String]::IsNullOrEmpty($ProfileLocation))
 			{
 				$CommonSplat.ProfileLocation = $ProfileLocation
 			}
@@ -1415,13 +1418,17 @@ Function New-AWSUtilitiesSplat {
 		{
 			foreach ($Key in $AWSSplat.GetEnumerator())
 			{
-				if ($Key.Name -eq "Region")
+				if ($Key.Name -eq "Region" -and -not [System.String]::IsNullOrEmpty($Key.Value))
 				{
 					$CommonSplat.Region = [Amazon.RegionEndpoint]::GetBySystemName($Key.Value)
 				}
 				else
 				{
-					$CommonSplat."$($Key.Name)" = $Key.Value
+					if ($Key.Value -ne $null)
+					{
+						Write-Verbose -Message "Adding key $($Key.Name) $($Key.Value)"
+						$CommonSplat."$($Key.Name)" = $Key.Value
+					}
 				}
 			}
 		}
@@ -1736,7 +1743,7 @@ Function Copy-EBSVolume {
         switch -Wildcard ($PSCmdlet.ParameterSetName)
         {
             "DestinationByName*" {
-				$Destination = Get-EC2InstanceByNameOrId -Name $SourceInstanceName @DestinationAWSUtilitiesSplat
+				$Destination = Get-EC2InstanceByNameOrId -Name $DestinationInstanceName @DestinationAWSUtilitiesSplat
 				$AvailabilityZone = $Destination.Placement.AvailabilityZone
 
                 break
@@ -1801,6 +1808,8 @@ Function Copy-EBSVolume {
 				$Counter++
 			}
 
+			Write-Progress -Completed -Activity "Creating snapshots"
+
 			if ($Counter -ge $Timeout)
 			{
 				throw "Timeout waiting for snapshots to be created."
@@ -1842,6 +1851,8 @@ Function Copy-EBSVolume {
 					Start-Sleep -Seconds 1
 					$Counter++
 				}
+
+				Write-Progress -Completed -Activity "Creating snapshots"
 
 				if ($Counter -ge $Timeout)
 				{
@@ -1901,6 +1912,8 @@ Function Copy-EBSVolume {
 				Start-Sleep -Seconds 1
 				$Counter++
 			}
+
+			Write-Progress -Completed -Activity "Creating volumes"
 
 			if ($Counter -ge $Timeout)
 			{
@@ -2141,13 +2154,68 @@ Function Mount-EBSVolumes {
 }
 
 Function Get-EC2InstanceByNameOrId {
+	<#
+		.SYNOPSIS
+			Gets an EC2 instance object by supplying its name or instance id.
+
+		.DESCRIPTION
+			The cmdlet gets a single Amazon.EC2.Model.Instance object from an instance name tag value or instance id. If multiple instances are
+			matched from a name tag, the cmdlet throws an exception, as it also does if it doesn't find an instance based on id.
+
+		.PARAMETER InstanceId
+			The id of the instance to get.
+
+		.PARAMETER InstanceName
+			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Get-EC2InstanceByNameOrId -Name server1 -ProfileName myprodacct
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			Amazon.EC2.Model.Instance
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/5/2017
+	#>
 	[CmdletBinding()]
 	Param(
 		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
 		[System.String]$InstanceId,
 
 		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
-		[System.String]$Name,
+		[Alias("Name")]
+		[System.String]$InstanceName,
 
 		[Parameter()]
 		[ValidateNotNull()]
@@ -2188,15 +2256,17 @@ Function Get-EC2InstanceByNameOrId {
 
 		if ($PSCmdlet.ParameterSetName -eq "Id")
 		{
+			Write-Verbose -Message "Getting instance by Id $InstanceId."
 			$Instances = Get-EC2Instance -InstanceId $InstanceId -ErrorAction SilentlyContinue @Splat
 		}
 		else
 		{
+			Write-Verbose -Message "Getting instance by Name $InstanceName."
 			[Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
 
 			#Filtering on tag values uses the "tag:" preface for the key name
 			$Filter.Name = "tag:Name"
-			$Filter.Value = $Name
+			$Filter.Value = $InstanceName
                 
 			#This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
 			#so save the error output and don't strongly type it
@@ -2218,7 +2288,7 @@ Function Get-EC2InstanceByNameOrId {
 				}
 				else
 				{
-					throw "Ambiguous match, more than 1 EC2 instance with the name $Name found. Try instance id instead."
+					throw "Ambiguous match, more than 1 EC2 instance with the name $InstanceName found. Try instance id instead."
 				}
 			}
 			else
@@ -2235,5 +2305,1597 @@ Function Get-EC2InstanceByNameOrId {
 	}
 
 	End {
+	}
+}
+
+Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
+	<#
+		.SYNOPSIS
+			This cmdlet attempts to fix broken network adapters on an instance through modifying the instance's offline root volume.
+
+		.DESCRIPTION
+			The cmdlet assumes the offline root volume of the instance to be fixed is already mounted to the server the cmdlet is being run on, indicated by the provided drive letter.
+			
+			The cmdlet then copies over the AWS PV Drivers or Citrix Xen drivers from a source specified, and optionally enhanced networking drivers, if specified.
+
+			At this point, the SYSTEM and SOFTWARE registry hives from the target drive are mounted and several updates to the registry are made, most importantly an auto logon using the credentials specified, which will be deleted at the next logon. 
+			The auto logon triggers run once tasks to install the drivers, and then reboots. If enhanced networking drivers are specified, the instance is updated to support srIovSupport or ENA as applicable.
+
+		.PARAMETER DriveLetter
+			The drive letter where the offline root volume is mounted.
+
+		.PARAMETER AWSPVDriverPath
+			The path to the AWS PV Drivers msi installer or Citrix Xen drivers msi installer to copy to the offline system. This defaults to c:\AWSPVDriverSetup.msi.
+
+		.PARAMETER EnhancedNetworkingDriverPath
+			The path to the enhanced networking drivers applicable for the instance type being fixed. 
+	
+			For Intel 82599 VF drivers, the directory should target the extracted output of the PROWinx64.exe file. For example if c:\IntelDrivers is specified, that folder should contain
+
+			c:\IntelDrivers\PROXGB
+			c:\InterDrivers\PRO40GB
+			etc...
+
+			For Elastic Network Adapter, if c:\ENA is specified, the directory should contain folders in this structure:
+			
+			c:\ENA\1.0.8.0\2012
+			c:\ENA\1.0.8.0\2012R2
+			c:\ENA\1.0.9.0\2008R2
+
+			Each of these folders should contain 3 files, ena.cat, ena.inf, ena.sys. These files and folder structure are included with the module.
+
+		.PARAMETER EnhancedNetworkingType
+			The type of enhanced networking drivers to setup, this is either Intel82599VF or ENA and is required if the EnhancedNetworkingDriverPath is specified to successfully setup the drivers. If the EC2 instance doesn't support enhanced networking, this can be an empty string or null or not specified.
+
+		.PARAMETER TempSystemKey
+			The key used to mount the offline SYSTEM registry hive in HKLM of the local machine. This defaults to AWSTempSystem.
+
+		.PARAMETER TempSoftwareKey
+			The key used to mount the offline SOFTWARE registry hive in HKLM of the local machine. This defaults to AWSTempSoftware.
+
+		.PARAMETER UserName
+			The user name to use for the auto logon. This can be specified as domain\user, user@domain.com (UPN format), or just the username. If only a username
+			is specified, provide the domain parameter, otherwise it will default to the offline machine computer name as specified in the computer's registry.
+
+			If the user is a domain user, a cached logon must be present to use it, as this cmdlet assumes the offline instance has no network connectivity.
+
+			The user must have local admin rights on the offline machine.
+
+		.PARAMETER Password
+			The password to be used for the auto logon corresponding to the provided user name.
+
+		.PARAMETER Credential
+			The credentials to use for the auto logon. See the UserName parameter for specifics on the username and domain requirements for the Credential UserName property.
+
+			The user must have local admin rights on the offline machine.
+
+		.PARAMETER Domain
+			The domain name to use for the auto logon if the supplied credentials/user name is an Active Directory account. Otherwise, do not specify this parameter, as the local machine name will be used for a local account logon. 
+
+			Also, if the Credential or UserName parameter is specified with a domain name included, you do not need to specify this parameter.
+		
+		.PARAMETER RemoteLogPath
+			The path to a file on the target server logs are written to during the RunOnce script. Defaults to $env:SystemDrive\NetworkAdapterFix.log.
+
+		.EXAMPLE
+			Invoke-FixAWSNetworkAdaptersOnOfflineDisk -DriveLetter 'e' -EnhancedNetworkingDriverPath c:\ENA -EnhancedNetworkingType ENA -UserName "contoso\john.smith" -Password (ConvertTo-SecureString -String "MyS3cureP@$$word" -AsPlainText -Force)
+
+			The cmdlet is executed against a mounted EBS root volume at "e:\" and is from an instance type that uses the Elastic Network Adapter.
+
+		.EXAMPLE
+			Invoke-FixAWSNetworkAdaptersOnOfflineDisk -DriveLetter 'e' -EnhancedNetworkingDriverPath c:\IntelDrivers -EnhancedNetworkingType Intel82599VF -Credential (Get-Credential)
+
+			The cmdlet is executed against a mounted EBS root volume at "e:\" and is from an instance type that uses the SR IOV support. The credentials to execute the AutoLogon and RunOnce script are prompted.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			None
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/12/2017
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true)]
+		[System.Char]$DriveLetter,
+
+		[Parameter()]
+		[ValidateScript({
+			Test-Path -Path $_
+		})]
+		[System.String]$AWSPVDriverPath = "c:\AWSPVDriverSetup.msi",
+
+		[Parameter()]
+		[ValidateScript({
+			Test-Path -Path $_
+		})]
+		[System.String]$EnhancedNetworkingDriverPath = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateSet("Intel82599VF", "ENA", "", $null)]
+		[System.String]$EnhancedNetworkingType = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$TempSystemKey = "AWSTempSystem",
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$TempSoftwareKey = "AWSTempSoftware",
+
+		[Parameter(ParameterSetName = "Username")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$UserName,
+
+		[Parameter(ParameterSetName = "Username")]
+		[ValidateNotNull()]
+		[System.Security.SecureString]$Password,
+
+		[Parameter(ParameterSetName = "Credential")]
+		[ValidateNotNull()]
+		[System.Management.Automation.Credential()]
+		[System.Management.Automation.PSCredential]$Credential = [System.Management.Automation.PSCredential]::Empty,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Domain = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$RemoteLogPath = "`$env:SystemDrive\NetworkAdapterFix.log"
+	)
+
+	Begin {
+		if (-not (New-Object -TypeName System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator))
+		{
+			throw "Script must be run with administrative privileges."
+		}
+	}
+
+	Process {
+		# Copy over drivers
+		# Use xcopy instead of Copy-Item because the cmdlet sometimes does not recognize the mounted drive if it was called
+		# from another command, thus the procedure fails
+		Write-Verbose -Message "Copying PV Drivers"
+		& xcopy $AWSPVDriverPath "$DriveLetter`:\" /Y | Out-Null
+
+		if (-not [System.String]::IsNullOrEmpty($EnhancedNetworkingDriverPath))
+		{
+			[System.String]$ENADriversPath = "$DriveLetter`:\EnhancedNetworking"
+			Write-Verbose -Message "Copying enhanced networking drivers to $ENADriversPath"
+			& xcopy $EnhancedNetworkingDriverPath "$ENADriversPath\*" /Y /E | Out-Null
+		}
+
+		# PART 1 - Fixes a broken NIC that has been disabled by the Plug and Play Cleanup Feature
+		Write-Verbose -Message "Configuring existing PV driver registry settings"
+		try
+		{   
+			$SysDrive = "$DriveLetter`:\Windows\System32\config\SYSTEM"
+			Write-Verbose -Message "Mounting offline registry at $SysDrive."
+			$Temp = & reg load "HKLM\$TempSystemKey" "$SysDrive"
+    
+			Write-Verbose -Message "Creating new PSDrive"
+			$Temp = New-PSDrive -Name $TempSystemKey -PSProvider Registry -Root "HKLM\$TempSystemKey"
+
+			# http://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/pvdrivers-troubleshooting.html#plug-n-play-script
+
+			[System.String[]]$FilterPaths = @(
+				"$TempSystemKey`:\ControlSet001\Control\Class\4d36e97d-e325-11ce-bfc1-08002be10318",
+				"$TempSystemKey`:\ControlSet001\Control\Class\4d36e96a-e325-11ce-bfc1-08002be10318"
+			)
+
+			[System.String[]]$OverrideKeys = @(
+				"xenvbd",
+				"xenfilt",
+				"xenbus",
+				"xeniface",
+				"xenvif"
+			)
+
+			foreach ($Item in $FilterPaths)
+			{
+				if (-not (Test-Path -Path $Item))
+				{
+					Write-Verbose -Message "Creating registry key $Item"
+					$Temp = New-Item -Path $Item
+				}
+
+				Write-Verbose -Message "Creating UpperFilters value XENFILT at $Item"
+				$Temp = Set-ItemProperty -Path $Item -Name UpperFilters -Value XENFILT -Type ([Microsoft.Win32.RegistryValueKind]::MultiString) -Force
+			}
+
+			foreach ($Item in $OverrideKeys)
+			{
+				if (Test-Path -Path "$TempSystemKey`:\ControlSet001\Services\$Item\StartOverride")
+				{
+					try
+					{
+						Write-Verbose -Message "Removing registry key $TempSystemKey`:\ControlSet001\Services\$Item\StartOverride"
+						Remove-Item -Path "$TempSystemKey`:\ControlSet001\Services\$Item\StartOverride" -Force
+					}
+					catch [Exception]
+					{
+						Write-Warning -Message "[ERROR] Error removing $Item : $($_.Exception.Message)"
+					}
+				}
+			}
+
+			[System.String]$XENBUSPath = "$TempSystemKey`:\ControlSet001\Services\XENBUS"
+
+			if (Test-Path -Path $XENBUSPath)
+			{
+				Write-Verbose -Message "Creating active device key."
+				$Temp = Set-ItemProperty -Path "$XENBUSPath\Parameters" -Name "ActiveDevice" -Value "PCI\VEN_5853&DEV_0001&SUBSYS_00015853&REV_01" -Type ([Microsoft.Win32.RegistryValueKind]::String) -Force
+				$Temp = Set-ItemProperty -Path $XENBUSPath -Name "Count" -Value 1 -Type ([Microsoft.Win32.RegistryValueKind]::DWord) -Force	    
+			}
+			
+			[System.String]$ProductTypePath = "$TempSystemKey`:\ControlSet001\Control\ProductOptions"
+			[System.String]$ComputerNamePath = "$TempSystemKey`:\ControlSet001\Control\ComputerName\ComputerName"
+
+			#This will be used later to determine if the server is a domain controller
+			[System.String]$ProductType = Get-ItemProperty -Path $ProductTypePath -Name ProductType | Select-Object -ExpandProperty ProductType
+			[System.String]$ComputerName = Get-ItemProperty -Path $ComputerNamePath -Name ComputerName | Select-Object -ExpandProperty ComputerName
+
+			Write-Verbose -Message "Server to be fixed: $ComputerName and is a $ProductType."
+		}
+		finally
+		{
+			Write-Verbose -Message "Cleaning up loaded registry hive."
+			$Temp = Remove-PSDrive -Name $TempSystemKey
+
+			# Remove unused references in hive
+			[System.GC]::Collect()
+
+			$Temp = & reg unload "HKLM\$TempSystemKey"
+		}
+
+		# PART 2 - Setup the driver installation for the PV drivers and Enhanced networking drivers
+		
+		# https://aws.amazon.com/premiumsupport/knowledge-center/corrupt-missing-drivers-windows/
+
+		Write-Verbose -Message "Setting up driver installation on next boot."
+
+		try
+		{
+			$SoftDrive = "$DriveLetter`:\Windows\System32\config\SOFTWARE"
+			Write-Verbose -Message "Mounting offline registry SOFTWARE have at $SoftDrive."
+
+			$Temp = & reg load "HKLM\$TempSoftwareKey" "$SoftDrive"
+
+			$Temp = New-PSDrive -Name $TempSoftwareKey -PSProvider Registry -Root "HKLM\$TempSoftwareKey"
+
+			$WinNTCurrentVersionPath = "$TempSoftwareKey`:\Microsoft\Windows NT\CurrentVersion"
+			$RunOncePath = "$TempSoftwareKey`:\Microsoft\Windows\CurrentVersion\RunOnce"
+			$AWSPVRegPath = "$TempSoftwareKey`:\Wow6432Node\Amazon\AWSPVDriverSetup"
+			$WinLogonPath = "$WinNTCurrentVersionPath\Winlogon"
+	
+			# Add the RunOnce task for the enhanced networking driver
+
+			# Test for the version of windows to determine the enhanced networking driver to use
+			[System.Int32]$CurrentMajor = Get-ItemProperty -Path $WinNTCurrentVersionPath -Name "CurrentMajorVersionNumber" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty CurrentMajorVersionNumber
+			[System.Int32]$CurrentMinor = Get-ItemProperty -Path $WinNTCurrentVersionPath -Name "CurrentMinorVersionNumber" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty CurrentMinorVersionNumber
+			[System.String]$CurrentVersion = Get-ItemProperty -Path $WinNTCurrentVersionPath -Name "CurrentVersion" | Select-Object -ExpandProperty CurrentVersion
+			[System.String]$PnPCommand = [System.String]::Empty
+			[System.String]$OSVersion = [System.String]::Empty
+
+			# This happens if the major and minor registry keys aren't present on servers below 2016
+			if ("$CurrentMajor$CurrentMinor" -eq "00")
+			{
+				$OSVersion = $CurrentVersion.Replace(".", "")
+			}
+			else
+			{
+				$OSVersion = "$CurrentMajor$CurrentMinor"
+			}
+
+			[System.String]$FixItScriptName = "FixItScript_$([Guid]::NewGuid()).ps1"
+			# Used if we want to execute a bat file from the runonce script that contains a call to the PowerShell
+			# [System.String]$FixItScriptName = "FixItScript_$([Guid]::NewGuid()).bat"
+
+			[System.String]$RunOnceScript = "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Starting runonce script.`"`r`n"
+			
+			$RunOnceScript += "`$ErrorActionPreference = `"Stop`"`r`n"
+			$RunOnceScript += "try {`r`n"
+
+			if (-not [System.String]::IsNullOrEmpty($EnhancedNetworkingType) -and -not [System.String]::IsNullOrEmpty($EnhancedNetworkingDriverPath))
+			{
+				switch ($EnhancedNetworkingType)
+				{
+					"Intel82599VF" {
+						Write-Verbose -Message "Setting up pnputil for INTEL drivers."
+						$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Running pnputil for INTEL drivers.`"`r`n"
+						
+						switch ($OSVersion)
+						{
+							# Server 2016
+							"100" {
+								$Version = "65"
+								$RunOnceScript += "& pnputil -i -a `$env:SystemDrive\EnhancedNetworking\PROXGB\Winx64\NDIS$Version\vxn$Version`x64.inf`r`n"
+								break
+							}
+							# Server 2012 R2
+							"63" {
+								$Version = "64"
+								$RunOnceScript += "& pnputil -i -a `$env:SystemDrive\EnhancedNetworking\PROXGB\Winx64\NDIS$Version\vxn$Version`x64.inf`r`n"
+								break
+							}
+							# Server 2012
+							"62" {
+								$Version = "63"
+								$RunOnceScript += "& pnputil -i -a `$env:SystemDrive\EnhancedNetworking\PROXGB\Winx64\NDIS$Version\vxn$Version`x64.inf`r`n"
+								break
+							}
+							# Server 2008 R2
+							"61" {
+								$Version = "62"
+								$RunOnceScript += "& pnputil -a `$env:SystemDrive\EnhancedNetworking\PROXGB\Winx64\NDIS$Version\vxn$Version`x64.inf`r`n"
+								break
+							}
+							default {
+								Write-Warning -Message "Not a compatible version of Windows $($_) to use enhanced networking."
+								break
+							}
+						}
+
+						break
+					}
+					"ENA" {
+						Write-Verbose -Message "Setting up pnputil for ENA drivers."
+
+						$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Running pnputil for ENA drivers.`"`r`n"
+
+						switch ($OSVersion)
+						{
+							# Server 2016
+							"100" {
+								$RunOnceScript += "& pnputil -i -a `$env:SystemDrive\EnhancedNetworking\1.0.8.0\2012R2\ena.inf`r`n"
+								break
+							}
+							# Server 2012 R2
+							"63" {
+								$RunOnceScript += "& pnputil -i -a `$env:SystemDrive\EnhancedNetworking\1.0.8.0\2012R2\ena.inf`r`n"
+								break
+							}
+							# Server 2012
+							"62" {
+								$RunOnceScript += "& pnputil -i -a `$env:SystemDrive\EnhancedNetworking\1.0.8.0\2012R2\ena.inf`r`n"
+								break
+							}
+							# Server 2008 R2
+							"61" {
+								$RunOnceScript += "& pnputil -i -a `$env:SystemDrive\EnhancedNetworking\1.0.9.0\2008R2\ena.inf`r`n"
+								break
+							}
+							default {
+								Write-Warning -Message "Not a compatible version of Windows $($_) to use enhanced networking."
+								break
+							}
+						}
+						break
+					}
+					default {
+						Write-Warning -Message "The enhanced networking type wasn't recognized: $EnhancedNetworkingType."
+						break
+					}
+				}
+			}
+			else
+			{
+				Write-Verbose -Message "No enhanced networking parameters specified, skipping installing enhanced networking drivers."
+			}
+
+			# Add the runonce task to run the PV driver installer
+
+			[System.IO.FileInfo]$DriverInfo = New-Object -TypeName System.IO.FileInfo($AWSPVDriverPath)
+
+			[System.String]$DriverInstallCommand = [System.String]::Empty
+
+			switch ($DriverInfo.Extension.ToLower())
+			{
+				".msi" {
+					# We know we copied the installer to the root of the c:\ drive
+					$DriverInstallCommand = "Start-Process -FilePath `"msiexec.exe`" -ArgumentList @(`"/i ```"`$env:SystemDrive\$($DriverInfo.Name)```"`", `"/qn`", `"/norestart`", `"/L*V `$env:SystemDrive\AWSPVDriverInstall.log`") -Wait -ErrorAction Stop`r`n"
+					break
+				}
+				".exe" {
+					# We know we copied the installer to the root of the c:\ drive
+					$DriverInstallCommand = "Start-Process -FilePath `"`$env:SystemDrive\$($DriverInfo.Name)`" -ArgumentList @(`"/q`") -Wait -ErrorAction Stop`r`n"
+					break
+				}
+				default {
+					Write-Warning -Message "[WARNING] Unknown file extension $($DriverInfo.Extension) for driver installer."
+					break
+				}
+			}
+
+			# Handle the username being provided as domain\username, domain.com\username, and UPN as username@domain.com
+			if ($PSCmdlet.ParameterSetName -eq "Credential")
+			{
+				$UserName = $Credential.UserName
+				$Password = $Credential.Password
+			}
+
+			if ($UserName.Contains("\"))
+			{
+				[System.String[]]$Parts = $UserName.Split("\")
+				$UserName = $Parts[1]
+				$Domain = $Parts[0].Split(".")[0]
+			}
+			elseif ($UserName.Contains("@"))
+			{
+				[System.String[]]$Parts = $UserName.Split("@")
+				$UserName = $Parts[0]
+				$Domain = $Parts[1].Split(".")[0]
+			}
+			else
+			{
+				$UserName = $Credential.UserName
+				$Domain = $ComputerName
+			}
+
+			[System.IntPtr]$UnmanagedString = [System.IntPtr]::Zero
+			[System.String]$PlainPassword = [System.String]::Empty
+
+			try
+			{	
+				$UnmanagedString = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($Password)
+				$PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($UnmanagedString)
+			}
+			finally
+			{
+				[System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($UnmanagedString)
+			}
+
+			$Keys = @(@{Key = "AutoAdminLogon"; Value = 1}, @{Key = "DefaultDomainName"; Value = $Domain }, @{Key = "DefaultPassword"; Value = $PlainPassword}, @{Key = "DefaultUserName"; Value = $UserName})
+
+			# WinNT = Workstation
+			# LanmanNT = Domain Controller
+			# ServerNT = Member Server
+
+			if (-not [System.String]::IsNullOrEmpty($DriverInstallCommand))
+			{
+				Write-Verbose -Message "The attached drive is from server type: $ProductType"
+
+				if ($ProductType -eq "LanmanNT")
+				{
+					# http://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/Upgrading_PV_drivers.html#aws-pv-upgrade-dc
+					Write-Verbose -Message "The server is a domain controller, updating boot options and installation parameters for the PV Drivers"
+
+					$Temp = Set-ItemProperty -Path $AWSPVRegPath -Type ([Microsoft.Win32.RegistryValueKind]::String) -Name "DisableDCCheck" -Value "true" -Force
+
+					$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Adding bcd entry for a domain controller.`"`r`n"
+					
+					# This will get run at next boot so that when the PV drivers install and force a reboot, it will boot fine
+					$RunOnceScript += "& bcdedit /set {default} safeboot dsrepair`r`n"
+					
+					# Build a second runonce script to execute after all the fixes have been made, so the first runonce script
+					# will modify the BCD so after the reboot it goes into dsrepair mode to complete the driver install as a domain
+					# controller won't boot if the NTDS.dit file is missing, which it could be if it is on a non-root volume, and the driver
+					# install will only make the root volume available until the install completes.
+					#
+					# The second runonce script deletes the dsrepair boot mode entry, removes the auto logon, and reboots the server again, so
+					# in this scenario, two reboots are executed
+
+					[System.String]$SecondFixItScriptName = "FixItScript_$([Guid]::NewGuid()).ps1"
+
+					$SecondRunOnceScript = "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Executing second runonce script for domain controllers.`"`r`n"
+					$SecondRunOnceScript += "try {`r`n"
+					$SecondRunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Deleting safeboot bcd entry.`"`r`n"
+					$SecondRunOnceScript += "& bcdedit /deletevalue safeboot`r`n"
+
+					foreach ($Item in $Keys)
+					{
+						# This will ensure the auto login keys are removed on the next reboot, 
+						$SecondRunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Removing $($Item.Key) from Winlogon.`"`r`n"
+						$SecondRunOnceScript += "Remove-ItemProperty -Name `"$($Item.Key)`" -Path `"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon`" -Force -ErrorAction Continue`r`n" 
+					}
+
+					$SecondRunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Rebooting.`"`r`n"
+					$SecondRunOnceScript += "Remove-Item -Path `"`$env:SystemDrive\$SecondFixItScriptName`" -Force`r`n"
+					$SecondRunOnceScript += "Restart-Computer -Force`r`n"
+					$SecondRunOnceScript += "}`r`ncatch [Exception] {`r`nAdd-Content -Path `"$RemoteLogPath`" -Value `"[ERROR] `$(Get-Date) : `$(`$_.Exception.Message)`"`r`n}"
+
+					Write-Verbose -Message "Saving second run once script:`r`n$SecondRunOnceScript"
+					Set-Content -Path "$DriveLetter`:\$SecondFixItScriptName" -Value $SecondRunOnceScript -Force
+
+					# This will add a new RunOnce item at the next boot to remove the bcd entry after the following reboot
+					$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Creating runonce registry entry with a script to delete BCD entry on next boot.`"`r`n"				
+					$RunOnceScript += "Set-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce -Name `"!*DeleteBCDEntry`" -Value `"c:\Windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Unrestricted -File ```"c:\$SecondFixItScriptName```"`"`r`n"
+				}
+				else
+				{
+					# Otherwise, we can remove the auto login keys after the first reboot since no further logins will be needed to execute scripts
+
+					$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Removing auto logon registry entries.`"`r`n"
+					
+					foreach ($Item in $Keys)
+					{
+						# This will ensure the auto login keys are removed on the next reboot, we only want to do this if the server is not a
+						# domain controller, because if it is, we want one more auto login to run the runonce commands to delete the bcd entry
+						$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Removing $($Item.Key) from Winlogon.`"`r`n"
+						$RunOnceScript += "Remove-ItemProperty -Name `"$($Item.Key)`" -Path `"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon`" -Force -ErrorAction Continue`r`n" 
+					}
+				}
+
+				# Adds a RunOnce command to install the PV driver, do it last since we need to reboot afterwards
+				$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Running driver install.`"`r`n"
+				$RunOnceScript += $DriverInstallCommand
+				$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Completed driver install, rebooting.`"`r`n"
+				$RunOnceScript += "Remove-Item -Path `"`$env:SystemDrive\$FixItScriptName`" -Force -ErrorAction Stop`r`n"				
+				$RunOnceScript += "Restart-Computer -Force`r`n"
+				$RunOnceScript += "}`r`ncatch [Exception] {`r`nAdd-Content -Path `"$RemoteLogPath`" -Value `"[ERROR] `$(Get-Date) : `$(`$_.Exception.Message)`"`r`n}"
+			}
+			else
+			{
+				Write-Verbose -Message "No NIC driver installation setup, which means the installer file wasn't an msi or exe."
+			}
+
+			if (-not [System.String]::IsNullOrEmpty($RunOnceScript))
+			{
+				Write-Verbose -Message "Setting up auto logon."
+
+				# Add the winlogon autologon keys
+				foreach ($Item in $Keys)
+				{
+					$Temp = Set-ItemProperty -Path $WinLogonPath -Name $Item.Key -Value $Item.Value -Type ([Microsoft.Win32.RegistryValueKind]::String) -Force
+				}
+
+				Write-Verbose -Message "Completed setting up auto logon."
+
+				Write-Verbose -Message "The run once script to be executed:`r`n$RunOnceScript"
+
+				# $Bytes = [System.Text.Encoding]::Unicode.GetBytes($RunOnceScript)
+				# $EncodedCommand = [Convert]::ToBase64String($Bytes)
+
+				# This is for running as a BAT
+				# Set-Content -Path "$DriveLetter`:\$FixItScriptName" -Value "c:\windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Unrestricted -EncodedCommand $EncodedCommand" -Force
+				# $Temp = Set-ItemProperty -Path $RunOncePath -Type ([Microsoft.Win32.RegistryValueKind]::String) -Name "!*BootScript" -Value "c:\$FixItScriptName"
+
+				# * will make the script run even in safe mode
+				# ! will make sure the script runs successfully before it is deleted
+				# This will run as FILE
+				Set-Content -Path "$DriveLetter`:\$FixItScriptName" -Value $RunOnceScript -Force
+				$Temp = Set-ItemProperty -Path $RunOncePath -Type ([Microsoft.Win32.RegistryValueKind]::String) -Name "!*BootScript" -Value "c:\windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Unrestricted -File `"c:\$FixItScriptName`"" -ErrorAction Stop
+				$Content = Get-ItemProperty -Path $RunOncePath -Name "!*BootScript" | Select-Object -ExpandProperty "!*BootScript"
+
+				Write-Verbose -Message "The value of $RunOncePath property `"!*BootScript`": $Content"
+			}
+		}
+		finally 
+		{
+			$Temp = Remove-PSDrive -Name $TempSoftwareKey
+
+			# Remove unused references in hive
+			[System.GC]::Collect()
+
+			$Temp = & reg unload "HKLM\$TempSoftwareKey"
+		}
+	}
+
+	End {
+	}
+}
+
+Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
+	<#
+		.SYNOPSIS
+			Executes the Invoke-AWSNetworkAdapterFixOnOfflineDisk cmdlet on a volume that is mounted to the current EC2 instance this cmdlet is being run on from another EC2 instance.		
+
+		.DESCRIPTION
+			The cmdlet targets another EC2 instance that is in health status 1/2 and is not reachable over the network. The instance is stopped and the root volume is detached and re-attached to the first
+			available device on the current EC2 instance. The user is prompted for the drive letter the new volume is given and then executes the Invoke-AWSNetworkAdapterFixOnOfflineDisk cmdlet using the source
+			instance type to determine the type of enhanced networking drivers required. Once the cmdlet is run, the volume is dismounted, re-attached to the source instance, and the instance is started.
+
+			The cmdlet initiates an EBS snapshot of the root volume of the source instance before it is modified. In testing this cmdlet, there have been occasions when an I/O error occured and the 
+			source EC2 instance could not boot after the root volume was modified because c:\windows\system32\winload.exe could not be found. The FixBCD parameter is designed to help correct that, but it
+			is not guaranteed to work. The safest option is to allow the snapshot to be taken in order to be able to revert to the original disk.
+
+			Additionally, the EC2 instance executing this cmdlet should not have any additional EBS volumes mounted when the cmdlet is run. It is also advisable to have rebooted this instance just before
+			executing the cmdlet and that there were no previous issues with mounting or dismounting EBS volumes. While these are not requirements to run the cmdlet, they provide the best chance of success.
+
+			While this cmdlet can be executed with explicit credentials, since it is designed to be run on an EC2 instance in the same region as the instance to be fixed, using an IAM Instance Profile (IAM Role) is preferred.
+
+		.PARAMETER InstanceId
+			The instance Id of the EC2 instance to fix.
+
+		.PARAMETER InstanceName
+			The instance name of the EC2 instance to fix. The name tag value must be unique to use this parameter.
+
+		.PARAMETER UserName
+			The user name to use for the auto logon. This can be specified as domain\user, user@domain.com (UPN format), or just the username. If only a username
+			is specified, provide the domain parameter, otherwise it will default to the offline machine computer name as specified in the computer's registry.
+
+			If the user is a domain user, a cached logon must be present to use it, as this cmdlet assumes the offline instance has no network connectivity.
+
+			The user must have local admin rights on the offline machine.
+
+		.PARAMETER Password
+			The password to be used for the auto logon corresponding to the provided user name.
+
+		.PARAMETER DestinationCredential
+			The credentials to use for the auto logon. See the UserName parameter for specifics on the username and domain requirements for the Credential UserName property.
+
+			The user must have local admin rights on the offline machine.
+
+		.PARAMETER Domain
+			The domain name to use for the auto logon if the supplied credentials/user name is an Active Directory account. Otherwise, do not specify this parameter, as the local machine name will be used for a local account logon. 
+
+			Also, if the Credential or UserName parameter is specified with a domain name included, you do not need to specify this parameter.
+
+		.PARAMETER IntelDriversPath
+			The path to the intel drivers used for the Intel 82599 VF enhanced networking driver.
+
+			For Intel 82599 VF drivers, the directory should target the extracted output of the PROWinx64.exe file. For example if c:\IntelDrivers is specified, that folder should contain
+
+			c:\IntelDrivers\PROXGB
+			c:\InterDrivers\PRO40GB
+			etc...
+
+			This defaults to "$env:SystemDrive\Intel82599VF".
+
+		.PARAMETER ENADriversPath
+			The path to the Elastic Network Adapter (ENA) drivers.
+
+			For Elastic Network Adapter, if c:\ENA is specified, the directory should contain folders in this structure:
+			
+			c:\ENA\1.0.8.0\2012
+			c:\ENA\1.0.8.0\2012R2
+			c:\ENA\1.0.9.0\2008R2
+
+			Each of these folders should contain 3 files, ena.cat, ena.inf, ena.sys. These files and folder structure are included with the module.
+
+		.PARAMETER Timeout
+			The timeout in seconds to use when waiting for AWS operations to complete like stopping an instance, dismounting an EBS volume, etc. This defaults to 600.
+
+		.PARAMETER DontTakeBackupSnapshot
+			Specify this parameter if you don't want a backup snapshot of the source EBS volume to be made.
+
+		.PARAMETER FixBCD
+			Ensures the BCD is up to date with the correct device settings and runs a chkdsk on all volumes.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.INPUTS
+			None.
+
+		.OUTPUTS
+			None.
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/12/2017			
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndUsername")]
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndCredential")]
+		[System.String]$InstanceId,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "NameAndUsername")]
+		[Parameter(Mandatory = $true, ParameterSetName = "NameAndCredential")]
+		[Alias("Name")]
+		[System.String]$InstanceName,
+
+		[Parameter(ParameterSetName = "IdAndUsername")]
+		[Parameter(ParameterSetName = "NameAndUsername")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$UserName,
+
+		[Parameter(ParameterSetName = "IdAndUsername")]
+		[Parameter(ParameterSetName = "NameAndUsername")]
+		[ValidateNotNull()]
+		[System.Security.SecureString]$Password,
+
+		[Parameter(ParameterSetName = "IdAndCredential")]
+		[Parameter(ParameterSetName = "NameAndCredential")]
+		[ValidateNotNull()]
+		[System.Management.Automation.Credential()]
+		[System.Management.Automation.PSCredential]$DestinationCredential = [System.Management.Automation.PSCredential]::Empty,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Domain = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[ValidateScript({
+			Test-Path -Path $_
+		})]
+		[System.String]$IntelDriversPath = "$env:SystemDrive\Intel82599VF",
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[ValidateScript({
+			Test-Path -Path $_
+		})]
+		[System.String]$ENADriversPath = "$env:SystemDrive\ENA",
+
+		[Parameter()]
+		[System.UInt32]$Timeout = 600,
+
+		[Parameter()]
+		[Switch]$DontTakeBackupSnapshot,
+
+		[Parameter()]
+		[Switch]$FixBCD,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+		if (-not (New-Object -TypeName System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator))
+		{
+			throw "Script must be run with administrative privileges."
+		}
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		
+		$TempSplat = $Splat
+
+		# Remove the source region so that the destination instance could be in a different region
+		if ($TempSplat.ContainsKey("Region"))
+		{
+			$TempSplat.Remove("Region")
+		}
+
+		$TempSplat.Region = Get-EC2InstanceRegion
+		
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $TempSplat
+
+		[Amazon.EC2.Model.Instance]$EC2 = $null
+
+		Write-Verbose -Message "Getting target EC2 instance."
+
+		if ($PSCmdlet.ParameterSetName.StartsWith("Id"))
+		{
+			$EC2 = Get-EC2InstanceByNameOrId -InstanceId $InstanceId @AwsUtilitiesSplat
+		}
+		else
+		{
+			$EC2 = Get-EC2InstanceByNameOrId -Name $InstanceName @AwsUtilitiesSplat
+		}
+
+		if ($EC2 -ne $null)
+		{
+			Update-EC2InstanceState -InstanceId $EC2.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
+
+			[System.String]$RootVolume = $EC2.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $EC2.RootDeviceName} | Select-Object -ExpandProperty Ebs | Select-Object -First 1 -ExpandProperty VolumeId
+
+			Write-Verbose -Message "Getting info about volume $RootVolume."
+
+			[Amazon.EC2.Model.Volume]$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat -ErrorAction Stop
+
+			if (-not $DontTakeBackupSnapshot)
+			{
+				Write-Verbose -Message "Taking a backup EBS snapshot of the root volume."
+				[Amazon.EC2.Model.Snapshot]$Backup = New-EC2Snapshot -VolumeId $EBS.VolumeId -Description "BACKUP for $($EC2.InstanceId)" @Splat
+
+				$Counter = 0
+
+				while ($Backup.State -ne [Amazon.EC2.SnapshotState]::Completed -and $Counter -lt $Timeout)
+				{
+					[System.String]$Percent = "0"
+
+					if ($Backup.Progress -ne $null)
+					{
+						$Percent = $Backup.Progress.Replace("%", "")
+					}
+
+					Write-Progress -Activity "Creating backup snapshot" -Status "$Percent% Complete:" -PercentComplete $Percent
+
+					Write-Verbose -Message "Waiting on snapshot $($Backup.SnapshotId) to complete, currently at $Percent% in state $($Backup.State)"
+					$Backup = Get-EC2Snapshot -SnapshotId $Backup.SnapshotId @Splat
+
+					Start-Sleep -Seconds 1
+					$Counter++
+				}
+
+				Write-Progress -Completed -Activity "Creating backup snapshot"
+
+				if ($Counter -ge $Timeout)
+				{
+					throw "Timeout waiting for the backup EBS snapshot to complete."
+				}
+
+				Write-Host -Object "Backup snapshot id $($Backup.SnapshotId)."
+			}
+
+			Write-Verbose -Message "Dismounting volumes"
+			$Dismount = Dismount-EC2Volume -VolumeId $RootVolume -InstanceId $EC2.InstanceId @Splat -ErrorAction Stop
+
+			$Counter = 0
+
+			while ($EBS.State -ne [Amazon.EC2.VolumeState]::Available -and $Counter -le $Timeout)
+			{
+				Write-Verbose -Message "Waiting for EBS volume to become available."
+				Start-Sleep -Seconds 5
+				$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat
+				$Counter += 5
+			}
+
+			if ($Counter -gt $Timeout)
+			{
+				throw "[ERROR] Timeout waiting for EBS volume $RootVolume to become available."
+			}
+
+			Write-Verbose -Message "EBS Volume $RootVolume is now available."
+
+			[System.String]$DestinationInstanceId = Get-EC2InstanceId
+			[Amazon.EC2.Model.Instance]$Destination = Get-EC2InstanceByNameOrId -InstanceId $DestinationInstanceId @AwsUtilitiesSplat
+
+			$OriginalDiskSerialNumbers = Get-Disk | Select-Object -ExpandProperty "SerialNumber"
+
+			Write-Verbose -Message "Mounting volume $RootVolume to $($Destination.InstanceId)."
+			Mount-EBSVolumes -VolumeIds $RootVolume -Instance $Destination -NextAvailableDevice @AwsUtilitiesSplat
+
+			Write-Verbose -Message "Sleeping to give the OS time to recognize the newly mounted disk."
+			Start-Sleep -Seconds 15
+
+			Write-Verbose -Message "Onlining disks and clearing readonly."
+
+			$NewDisks = Get-Disk | Where-Object {$OriginalDiskSerialNumbers -notcontains $_.SerialNumber}
+			$NewDisks | Set-Disk -IsOffline $false
+			$NewDisks | Set-Disk -IsReadOnly $false
+
+			$DriveLetter = Read-Host -Prompt "Enter new drive letter that was mounted."
+
+			[System.Collections.Hashtable]$ScriptSplat = @{}
+
+			if ($PSCmdlet.ParameterSetName.EndsWith("Credential"))
+			{
+				$ScriptSplat.Credential = $DestinationCredential
+			}
+			else
+			{
+				$ScriptSplat.UserName = $UserName
+				$ScriptSplat.Password = $Password
+			}
+
+			if (-not [System.String]::IsNullOrEmpty($Domain))
+			{
+				$ScriptSplat.Domain = $Domain
+			}
+
+			$IntelNetworkingTypes = @("c3", "c4", "d2", "i2", "r3", "m4")
+			$ENANetworkingTypes = @("f1", "i3", "p2", "r4", "x1")
+
+			Write-Verbose -Message "Instance type is $($EC2.InstanceType.Value)."
+
+			$TypePrefix = $EC2.InstanceType.Value.Substring(0, 2)
+
+			$DriversPath = [System.String]::Empty
+
+			if ($TypePrefix -iin $IntelNetworkingTypes -and $EC2.InstanceType.Value -ine "m4.16xlarge")
+			{
+				Write-Verbose -Message "Using Intel enhanced networking drivers."
+				$ScriptSplat.EnhancedNetworkingType = $script:INTEL_DRIVER
+				$ScriptSplat.EnhancedNetworkingDriverPath = $IntelDriversPath
+			}
+			elseif ($TypePrefix -iin $ENANetworkingTypes -or $EC2.InstanceType.Value -ieq "m4.16xlarge")
+			{
+				Write-Verbose -Message "Use ENA enhanced networking drivers."
+				$ScriptSplat.EnhancedNetworkingType = $script:ENA
+				$ScriptSplat.EnhancedNetworkingDriverPath = $ENADriversPath
+			}
+			else
+			{
+				# Make sure to establish the key so we can test it later to see if we enable ENA or not
+				$ScriptSplat.EnhancedNetworkingType = [System.String]::Empty
+				$ScriptSplat.EnhancedNetworkingDriverPath = [System.String]::Empty
+				Write-Warning -Message "The instance type $($EC2.InstanceType.Value) does not support enhanced networking."
+			}
+
+			Write-Verbose -Message "Running Invoke-AWSNetworkAdapterFixOnOfflineDisk."
+			
+			try
+			{
+				Invoke-AWSNetworkAdapterFixOnOfflineDisk -DriveLetter ([System.Char]$DriveLetter) @ScriptSplat
+			}
+			catch [Exception]
+			{
+				Write-Warning -Message "Could not modify the offline disk: $($_.Exception.Message)."
+			}
+
+			if ($FixBCD)
+			{
+				Write-Verbose -Message "Running a chkdsk on the mounted drive."
+				& chkdsk.exe "$DriveLetter`:" /F
+
+				Write-Verbose -Message "Running a chkdsk on recovery partition."
+				& chkdsk.exe "$([System.Char](([System.Int32]$DriveLetter) - 1)):" /F
+
+				Write-Verbose -Message "Checking BCD."
+				$BCDPath = "$([System.Char](([System.Int32]$DriveLetter) - 1)):\Boot\BCD"
+				& bcdedit.exe /store "$BCDPath"
+
+				Write-Verbose -Message "Fixing up BCD."
+
+				& bcdedit.exe /store "$BCDPath" /set "{bootmgr}" device boot
+				& bcdedit.exe /store "$BCDPath" /set "{default}" device partition=c:
+				& bcdedit.exe /store "$BCDPath" /set "{default}" osdevice partition=c:
+				& bcdedit.exe /store "$BCDPath"
+			}
+
+			Write-Verbose -Message "Offlining disks."
+			$NewDisks | Set-Disk -IsOffline $true
+
+			Write-Verbose -Message "Removing mounted volume."
+			$Dismount = Dismount-EC2Volume -InstanceId $Destination.InstanceId -VolumeId $RootVolume @Splat
+
+			$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat
+
+			$Counter = 0
+
+			while ($EBS.State -ne [Amazon.EC2.VolumeState]::Available -and $Counter -le $Timeout)
+			{
+				Write-Verbose -Message "Waiting for EBS volume to become available."
+				Start-Sleep -Seconds 5
+				$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat
+				$Counter += 5
+			}
+
+			if ($Counter -gt $Timeout)
+			{
+				throw "[ERROR] Timeout waiting for EBS volume $RootVolume to become available."
+			}
+
+			Write-Verbose -Message "Attaching volume back to original instance."
+			[Amazon.EC2.Model.VolumeAttachment]$Attachment = Add-EC2Volume -Device "/dev/sda1" -InstanceId $EC2.InstanceId -VolumeId $RootVolume @Splat
+
+			if ($ScriptSplat.ContainsKey("EnhancedNetworkingType") -and (-not [System.String]::IsNullOrEmpty($ScriptSplat.EnhancedNetworkingType)))
+			{
+				if ($ScriptSplat.EnhancedNetworkingType -eq $script:INTEL_DRIVER)
+				{
+					Write-Verbose -Message "Enabling srIov support on $($EC2.InstanceId)."
+					Edit-EC2InstanceAttribute -InstanceId $EC2.InstanceId -SriovNetSupport "simple" 
+				}
+				elseif ($ScriptSplat.EnhancedNetworkingType -eq $script:ENA)
+				{
+					Write-Verbose -Message "Enabling ENA support on $($EC2.InstanceId)."
+					Edit-EC2InstanceAttribute -InstanceId $EC2.InstanceId -EnaSupport $true
+				}
+				else
+				{
+					Write-Warning -Message "The enhanced networking type specified was not recognized: $($ScriptSplat.EnhancedNetworkingType)."
+				}
+			}
+			else
+			{
+				Write-Verbose -Message "Skipping modifying instance attributes to support enhanced networking."
+			}
+
+			$Result = Update-EC2InstanceState -InstanceId $EC2.InstanceId -State START @AwsUtilitiesSplat
+		}
+		else
+		{
+			Write-Warning -Message "Could not find EC2 instance"
+		}
+	}
+
+	End {
+	}
+}
+
+Function Update-EC2InstanceState {
+	Param(
+		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
+		[Alias("Name")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceName,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceId,
+
+		[Parameter(Mandatory = $true)]
+		[ValidateSet("STOP", "START", "TERMINATE")]
+		[System.String]$State,
+
+		[Parameter()]
+		[Switch]$PassThru,
+
+		[Parameter()]
+		[Switch]$Wait,
+
+		[Parameter()]
+		[System.Int32]$Timeout = 600,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+		[System.Collections.Hashtable]$InstanceSplat = @{}
+
+		if ($PSCmdlet.ParameterSetName.Equals("Id"))
+		{
+			$InstanceSplat.InstanceId = $InstanceId
+		}
+		else
+		{
+			$InstanceSplat.InstanceName = $InstanceName
+		}
+
+		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
+		[Amazon.EC2.InstanceStateName]$DesiredState = $null
+		[Amazon.EC2.Model.InstanceStateChange]$Result = $null
+
+		Write-Verbose -Message "Current instance state: $($Instance.State.Name)."
+
+		switch ($State)
+		{
+			"STOP" {
+				if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopped -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopping -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::ShuttingDown)
+				{
+					$Result = Stop-EC2Instance -InstanceId $Instance.InstanceId @Splat
+				}
+				else
+				{
+					Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+				}
+
+				$DesiredState = [Amazon.EC2.InstanceStateName]::Stopped
+				
+				break
+			}
+			"START" {
+				if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Running -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Pending)
+				{
+					$Result = Start-EC2Instance -InstanceId $Instance.InstanceId @Splat
+				}
+				else
+				{
+					Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+				}
+
+				$DesiredState = [Amazon.EC2.InstanceStateName]::Running
+
+				break
+			}
+			"TERMINATE" {
+				if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Terminated)
+				{
+					$Result = Remove-EC2Instance -InstanceId $Instance.InstanceId -Force @Splat
+				}
+				else
+				{
+					Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+				}
+
+				$DesiredState = [Amazon.EC2.InstanceStateName]::Terminated
+
+				break
+			}
+			default {
+				throw "Unexpected instance state provided: $State."
+			}
+		}
+
+		if ($Wait)
+		{
+			Write-Host -Object "Waiting for EC2 instance $($Instance.InstanceId) to $State..."
+
+			[System.Int32]$Increment = 5
+			[System.Int32]$Counter = 0
+
+			while ($Instance.State.Name -ne $DesiredState -and $Counter -lt $Timeout)
+			{
+				Write-Verbose -Message "Waiting for $($Instance.InstanceId) to $State."
+
+				Start-Sleep -Seconds $Increment
+				$Counter += $Increment
+
+				$Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+			}
+
+			if ($Counter -ge $Timeout)
+			{
+				throw "Timeout waiting for instance to $State."
+			}
+
+			Write-Verbose -Message "Successfully completed waiting for state change."
+		}
+
+		if ($PassThru)
+		{
+			Write-Output -InputObject $Result
+		}
+	}
+
+	End {
+	}
+}
+
+Function Update-EC2InstanceAmiId {
+	Param(
+		[Parameter(Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$NewAmiId,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
+		[Alias("Name")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceName,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceId,
+
+		[Parameter()]
+		[System.Int32]$Timeout = 600,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+
+		$InstanceSplat = @{}
+
+		if ($PSCmdlet.ParameterSetName -eq "Id")
+		{
+			Write-Verbose -Message "Using instance id $InstanceId."
+			$InstanceSplat.InstanceId = $InstanceId
+		}
+		else
+		{
+			Write-Verbose -Message "Using instance name $InstanceName."
+			$InstanceSplat.InstanceName = $InstanceName
+		}
+
+		# Get the source EC2 instance
+		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
+	
+		# Stop the source EC2 instance
+		Update-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
+
+		[PSCustomObject[]]$BlockDevices = @()
+
+		# Detach all EBS volumes from the source machine
+		
+		foreach ($BlockDevice in $Instance.BlockDeviceMappings)
+		{
+			$BlockDevices += [PSCustomObject]@{Volume = Get-EC2Volume -VolumeId $BlockDevice.Ebs.VolumeId @Splat; DeviceName = $BlockDevice.DeviceName}
+
+			Dismount-EC2Volume -InstanceId $Instance.InstanceId -VolumeId $BlockDevice.Ebs.VolumeId @Splat | Out-Null
+		}
+
+		while (($BlockDevices | Select-Object -ExpandProperty Volume | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Count -ne $BlockDevices.Count)
+		{
+			Write-Verbose -Message "Waiting for volumes to detach."
+
+			for ($i = 0; $i -lt $BlockDevices.Length; $i++)
+			{
+				$BlockDevices[$i].Volume = Get-EC2Volume -VolumeId $BlockDevices[$i].Volume.VolumeId @Splat
+			}
+
+			Start-Sleep -Seconds 5
+		}
+
+		# Detach all the additional network interfaces
+
+		[PSCustomObject[]]$Interfaces = @()
+
+		foreach ($Interface in ($Instance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -ne 0}))
+		{
+			$Interfaces += [PSCustomObject]@{ DeviceIndex = $Interface.Attachment.DeviceIndex; Interface = $Interface}
+
+			Write-Verbose -Message "Dismounting interface $($Interface.NetworkInterfaceId) at index $($Interface.Attachment.DeviceIndex) from the source instance."				
+			Dismount-EC2NetworkInterface -AttachmentId $Interface.Attachment.AttachmentId @Splat | Out-Null
+		}
+
+		if ($Interfaces.Count -gt 0)
+		{
+			# While the count of interfaces whose status is available is not equal to the count of interfaces
+			# keep waiting until they are all available
+			# Use a minus 1 on Interfaces count since we are not detaching the interface at index 0
+			while ((($Interfaces | Select-Object -ExpandProperty Interface | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::Available }).Count -ne $Interfaces.Count - 1)
+			{
+				Write-Verbose -Message "Waiting for all network interfaces to detach."
+
+				# Start at 1 since index 0 isn't being detached
+				for ($i = 1; $i -lt $Interfaces.Length; $i++)
+				{
+					$Interfaces[$i].Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Interfaces[$i].NetworkInterfaceId @Splat
+				}
+
+				Start-Sleep -Seconds 5
+			}
+		}
+
+		Write-Verbose -Message "Deleting the original instance."
+		Write-Host -Object "Original instance AMI id: $($Instance.ImageId)"
+
+		Update-EC2InstanceState -InstanceId $Instance.InstanceId -State TERMINATE -Wait -Timeout $Timeout @AwsUtilitiesSplat
+
+		# Build some optional parameters for New-EC2Instance
+		[System.Collections.Hashtable]$NewInstanceSplat = @{}
+
+		if ($Instance.InstanceLifecycle -ne $null)
+		{
+			$NewInstanceSplat.InstanceLifecycle = $Instance.InstanceLifecycle
+		}
+
+		# Windows instances won't have a kernel id
+		if (-not [System.String]::IsNullOrEmpty($Instance.KernelId))
+		{
+			$NewInstanceSplat.KernelId = $Instance.KernelId
+		}
+
+		# Copy all of the tags from the source insance
+		if ($Instance.Tags.Count -gt 0)
+		{
+			[Amazon.EC2.Model.TagSpecification]$Tags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
+
+			$Tags.ResourceType = [Amazon.EC2.ResourceType]::Instance
+
+			$Tags.Tags = $Instance.Tags
+
+			$NewInstanceSplat.TagSpecification = $Tags
+		}
+
+		# Copy placement info for affinity, placement group, and host id
+		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.Affinity))
+		{
+			$NewInstanceSplat.Affinity = $Instance.Placement.Affinity
+		}
+
+		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.GroupName))
+		{
+			$NewInstanceSplat.PlacementGroup = $Instance.Placement.GroupName
+		}
+
+		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.HostId))
+		{
+			$NewInstanceSplat.HostId = $Instance.Placement.HostId
+		}
+
+		# This specifies if detailed monitoring is enabled
+
+		if ($Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Enabled -or $Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Pending)
+		{
+			$NewInstanceSplat.Monitoring_Enabled = $true
+		}
+
+		if ($Instance.EbsOptimized -eq $true)
+		{
+			$NewInstanceSplat.EbsOptimized = $true
+		}
+		
+		Write-Verbose -Message @"
+Launching new instance:
+	Type:              $($Instance.InstanceType)
+	Subnet:            $($Instance.SubnetId)
+	Security Groups:   $([System.String]::Join(",", ($Instance.SecurityGroups | Select-Object -ExpandProperty GroupId)))
+	AZ:                $($Instance.Placement.AvailabilityZone)
+	IAM Profile:       $($Instance.IamInstanceProfile.Arn)
+	Private IP:        $($Instance.PrivateIPAddress)
+	Tenancy:           $($Instance.Placement.Tenancy)
+"@
+
+		[Amazon.EC2.Model.Instance]$NewInstance = $null
+
+		$Temp = New-EC2Instance -ImageId $NewAmiId `
+						-AssociatePublicIp (-not [System.String]::IsNullOrEmpty($Instance.PublicIpAddress)) `
+						-KeyName $Instance.KeyName `
+						-SecurityGroupId ($Instance.SecurityGroups | Select-Object -ExpandProperty GroupId) `
+						-SubnetId $Instance.SubnetId `
+						-InstanceType $Instance.InstanceType `
+						-AvailabilityZone $Instance.Placement.AvailabilityZone `
+						-Tenancy $Instance.Placement.Tenancy `
+						-InstanceProfile_Arn $Instance.IamInstanceProfile.Arn `
+						-PrivateIpAddress $Instance.PrivateIpAddress `
+						@NewInstanceSplat @Splat
+
+		if ($Temp -eq $null)
+		{
+			throw "Could not create the new instance."
+		}
+
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $Temp.Instances[0].InstanceId @AwsUtilitiesSplat
+
+		Update-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Wait -Timeout $Timeout @AwsUtilitiesSplat
+
+		Write-Verbose -Message "Stopping new instance."
+
+		Update-EC2InstanceState -InstanceId $NewInstance.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
+
+		if (-not [System.String]::IsNullOrEmpty($Instance.SriovNetSupport))
+		{
+			Write-Verbose -Message "Enabling SrIovNetSupport"
+			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -SriovNetSupport $Instance.SriovNetSupport @Splat | Out-Null
+		}
+
+		if ($Instance.EnaSupport -eq $true)
+		{
+			Write-Verbose -Message "Enabling ENA"
+			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -EnaSupport $true @Splat | Out-Null
+		}
+
+		# Update the interface at index 0 because we can't specify New-EC2Instance with both a set of security groups for the instance
+		# in addition to security groups for the ENI as well as a specific subnet for the instance and ENI
+
+		[Amazon.EC2.Model.InstanceNetworkInterface]$RootNetDevice = $NewInstance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -eq 0} | Select-Object -First 1
+		[Amazon.EC2.Model.InstanceNetworkInterface]$SourceRootInterface = $Interfaces | Where-Object {$_.DeviceIndex -eq 0} | Select-Object -First 1 -ExpandProperty Interface
+
+		[System.Collections.Hashtable]$InterfaceSplat = @{}
+
+		if ($SourceRootInterface.SourceDestCheck -ne $null)
+		{
+			$InterfaceSplat.SourceDestCheck = $SourceRootInterface.SourceDestCheck
+		}
+
+		if (-not [System.String]::IsNullOrEmpty($SourceRootInterface.Description))
+		{
+			$InterfaceSplat.Description = $SourceRootInterface.Description
+		}
+
+		if ($SourceRootInterface.Groups.Count -gt 0)
+		{
+			$InterfaceSplat.Groups = ($SourceRootInterface.Groups | Select-Object -ExpandProperty GroupId) 
+		}
+
+		if ($InterfaceSplat.Count -gt 0)
+		{
+			Write-Verbose -Message "Updated primary network interface attributes."
+			Edit-EC2NetworkInterfaceAttribute -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId `
+											@InterfaceSplat `
+											@Splat | Out-Null
+		}
+
+		# If the source machine had multiple IPs on the root ENI, add those IPs back
+		if ($SourceRootInterface.PrivateIpAddresses.Count -gt 1)
+		{
+			Write-Verbose -Message "Adding secondary IP addresses to root network interface."
+			Register-EC2PrivateIpAddress -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId -PrivateIpAddress ($SourceRootInterface.PrivateIpAddresses | Where-Object {$_.Primary -eq $false} | Select-Object -ExpandProperty PrivateIpAddress) @Splat | Out-Null
+		}
+								
+		[Amazon.EC2.Model.NetworkInterface[]]$InterfacesToDelete = @()
+
+		foreach ($Interface in ($NewInstance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -ne 0 }))
+		{
+			$InterfacesToDelete += Get-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId @Splat
+			Write-Verbose -Message "Dismounting network interface $($Interface.NetworkInterfaceId) from new instance."
+			Dismount-EC2NetworkInterface -AttachmentId $Interface.Attachment.AttachmentId @Splat | Out-Null
+		}
+
+		if ($InterfacesToDelete.Count -gt 0)
+		{
+			while ((($InterfacesToDelete | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::Available }).Count -ne $InterfacesToDelete.Count)
+			{
+				Write-Verbose -Message "Waiting for all network interfaces to detach."
+
+				for ($i = 0; $i -lt $InterfacesToDelete.Length; $i++)
+				{
+					$InterfacesToDelete[$i] = Get-EC2NetworkInterface -NetworkInterfaceId $InterfacesToDelete[$i].NetworkInterfaceId @Splat
+				}
+
+				Start-Sleep -Seconds 5
+			}
+
+			foreach ($Interface in $InterfacesToDelete)
+			{
+				Write-Verbose -Message "Deleting interface $($Interface.NetworkInterfaceId)."
+				Remove-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId -Force @Splat | Out-Null
+			}
+		}
+
+		# Update the value we have after all the interfaces have been updated, removed, and/or deleted
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
+
+		if ($Interfaces.Count -gt 0)
+		{
+			Write-Verbose -Message "Adding network interfaces to the new instance."
+
+			foreach ($Interface in $Interfaces)
+			{
+				Write-Verbose -Message "Adding $($Interface.Interface.NetworkInterfaceId) at index $($Interface.DeviceIndex)."
+				Add-EC2NetworkInterface -InstanceId $NewInstance.InstanceId -NetworkInterfaceId $Interface.Interface.NetworkInterfaceId -DeviceIndex $Interface.DeviceIndex @Splat | Out-Null
+			}
+
+			while ((($Interfaces | Select-Object -ExpandProperty Interface | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::InUse }).Count -ne $Interfaces.Count)
+			{
+				Write-Verbose -Message "Waiting for all network interfaces to be in use."
+
+				for ($i = 0; $i -lt $Interfaces.Count; $i++)
+				{
+					$Interfaces[$i].Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Interfaces[$i].Interface.NetworkInterfaceId @Splat
+				}
+
+				Start-Sleep -Seconds 5
+			}
+		}
+
+		# Update again after new interfaces have been added
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
+
+		Write-Verbose -Message "Removing EBS volumes from the new instance."
+
+		[Amazon.EC2.Model.Volume[]]$VolumesToDelete = @()
+
+		foreach ($BlockDevice in $NewInstance.BlockDeviceMappings)
+		{
+			Write-Verbose -Message "Dismounting device $($BlockDevice.Ebs.VolumeId) at $($BlockDevice.DeviceName)."
+			Dismount-EC2Volume -InstanceId $NewInstance.InstanceId -VolumeId $BlockDevice.Ebs.VolumeId @Splat | Out-Null
+
+			$VolumesToDelete += Get-EC2Volume -VolumeId $BlockDevice.Ebs.VolumeId @Splat
+		}
+
+		if ($VolumesToDelete.Count -gt 0)
+		{
+			while (($VolumesToDelete | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Count -ne $VolumesToDelete.Length)
+			{
+				Write-Verbose -Message "Waiting for volumes to become available."
+
+				for ($i = 0; $i -lt $VolumesToDelete.Length; $i++)
+				{
+					$VolumesToDelete[$i] = Get-EC2Volume -VolumeId $VolumesToDelete[$i].VolumeId @Splat
+				}
+
+				Start-Sleep -Seconds 5
+			}
+
+			foreach ($Volume in $VolumesToDelete)
+			{
+				Write-Verbose -Message "Deleting new instance volume $($Volume.VolumeId)." 
+				Remove-EC2Volume -VolumeId $Volume.VolumeId -Force @Splat
+			}
+		}
+
+		# Update again after all volumes have been removed
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
+
+		Write-Verbose -Message "Adding original EBS volumes to new instance."
+
+		foreach ($BlockDevice in $BlockDevices)
+		{
+			Write-Verbose -Message "Adding $($BlockDevice.Volume.VolumeId) to device $($BlockDevice.DeviceName)."
+			Add-EC2Volume -InstanceId $NewInstance.InstanceId -Device $BlockDevice.DeviceName -VolumeId $BlockDevice.Volume.VolumeId @Splat | Out-Null
+		}
+
+		$Counter = 0
+
+		while (($BlockDevices | Select-Object -ExpandProperty Volume | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::InUse}).Count -ne $BlockDevices.Count -and $Counter -lt $Timeout)
+		{
+			Write-Verbose -Message "Waiting for volumes to be attached."
+
+			for ($i = 0; $i -lt $BlockDevices.Length; $i++)
+			{
+				$BlockDevices[$i].Volume = Get-EC2Volume -VolumeId $BlockDevices[$i].Volume.VolumeId @Splat
+			}
+
+			Start-Sleep -Seconds 5
+			$Counter += 5
+		}
+
+		if ($Counter -ge $Timeout)
+		{
+			throw "Timout waiting for volumes to be attached to the new instance."
+		}
+
+		Write-Verbose -Message "Starting instance."
+
+		Update-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START @AwsUtilitiesSplat 
+	}
+
+	End {
+
 	}
 }
