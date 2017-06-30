@@ -728,6 +728,8 @@ Function Get-AWSProductInformation {
 
 			$private:Url = "$private:BaseUrl$($private:IndexFileContents.offers | Select-Object -ExpandProperty $PSBoundParameters["Product"] | Select-Object -ExpandProperty currentVersionUrl)"
             [System.Net.WebClient]$private:WebClient = New-Object -TypeName System.Net.WebClient
+			
+			Write-Verbose -Message $private:Url
 			[System.String]$private:Response = $WebClient.DownloadString($private:Url)
 		}
 		else
@@ -1452,7 +1454,7 @@ Function Copy-EBSVolume {
 			If a destination EC2 instance is not specified either by Id or name, the volumes are created in the destination region, but are not
 			attached to anything and the cmdlet will return details about the volumes.
 
-			The volume are attached to the first available device on the EC2 instance starting at xvdb and will attach until xvdp.
+			The volume are attached to the first available device on the EC2 instance starting at xvdf and will attach until xvdp.
 
 		.PARAMETER SourceInstanceId
 			The Id of the source EC2 instance to copy EBS volumes from.
@@ -1978,7 +1980,7 @@ Function Mount-EBSVolumes {
 			The Ids of the volumes to attach. The must be in an available status.
 
 		.PARAMETER NextAvailableDevice
-			Specifies that the cmdlet will find the next available device between xvdb and xvdp.
+			Specifies that the cmdlet will find the next available device between xvdf and xvdp.
 
 		.PARAMETER Device
 			Specify the device that the volume will be attached at. If multiple volumes are specified, this is the starting
@@ -2043,8 +2045,8 @@ Function Mount-EBSVolumes {
 
 		[Parameter(ParameterSetName = "InputObjectAndDevice", Mandatory = $true)]
 		[Parameter(ParameterSetName = "IdAndDevice", Mandatory = $true)]
-		[ValidateSet("xvdb", "xvdc", "xvdd", "xvde", "xvdf", "xvdg", "xvdh", "xvdi", "xvdj",
-			"xvdk", "xvdl", "xvdm", "xvdn", "xvdo", "xvdp", "xvdq")]
+		[ValidateSet("xvdf", "xvdg", "xvdh", "xvdi", "xvdj",
+			"xvdk", "xvdl", "xvdm", "xvdn", "xvdo", "xvdp")]
 		[System.String]$Device,
 
 		[Parameter(Mandatory = $true, ParameterSetName = "IdAndDevice")]
@@ -2102,7 +2104,7 @@ Function Mount-EBSVolumes {
 		if ($NextAvailableDevice)
 		{
 			#If you map an EBS volume with the name xvda, Windows does not recognize the volume.
-			$CurrentLetter = [System.Int32][System.Char]'b'
+			$CurrentLetter = [System.Int32][System.Char]'f'
 		}
 		else
 		{
@@ -3113,7 +3115,7 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 
 		if ($EC2 -ne $null)
 		{
-			Update-EC2InstanceState -InstanceId $EC2.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
+			Set-EC2InstanceState -InstanceId $EC2.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
 
 			[System.String]$RootVolume = $EC2.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $EC2.RootDeviceName} | Select-Object -ExpandProperty Ebs | Select-Object -First 1 -ExpandProperty VolumeId
 
@@ -3320,7 +3322,7 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 				Write-Verbose -Message "Skipping modifying instance attributes to support enhanced networking."
 			}
 
-			$Result = Update-EC2InstanceState -InstanceId $EC2.InstanceId -State START @AwsUtilitiesSplat
+			$Result = Set-EC2InstanceState -InstanceId $EC2.InstanceId -State START @AwsUtilitiesSplat
 		}
 		else
 		{
@@ -3332,7 +3334,76 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 	}
 }
 
-Function Update-EC2InstanceState {
+Function Set-EC2InstanceState {
+	<#
+		.SYNOPSIS
+			Changes the EC2 instance state to either START, STOP, TERMINATE, or RESTART the instance.
+
+		.DESCRIPTION
+			The cmdlet changes the state of the instance to achieve the desired end state if required. The cmdlet is idempotent, multiple calls to start an EC2 instance, for exampple, will succeed, but no action will be performed if the instance is already in the running state. If PassThru is specified, null will be returned if no action is taken.
+
+		.PARAMETER InstanceId
+			The id of the instance to get.
+
+		.PARAMETER InstanceName
+			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
+
+		.PARAMETER State
+			The action to perform on the EC2 instance, this is either STOP, START, RESTART, or TERMINATE. If RESTART is specified, then the Wait parameter has no effect.
+
+		.PARAMETER Timeout
+			The amount of time in seconds to wait for the EC2 to reach the desired state if the Wait parameter is specified. This defaults to 600.
+
+		.PARAMETER Wait
+			Specify to wait for the EC2 instance to reach the desired state.
+
+		.PARAMETER PassThru
+			Returns back the InstanceStateChange result or InstanceId if RESTART is specified.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Set-EC2InstanceState -InstanceId $EC2.InstanceId -State START -Wait 
+
+			Starts the specified EC2 instance and waits for it to reach the Running state.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			None or Amazon.EC2.Model.InstanceStateChange or System.String
+
+			A string is returned if RESTART is specified, otherwise an InstanceStateChange object is returned if PassThru is specified.
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/30/2017
+	#>
 	Param(
 		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
 		[Alias("Name")]
@@ -3344,7 +3415,7 @@ Function Update-EC2InstanceState {
 		[System.String]$InstanceId,
 
 		[Parameter(Mandatory = $true)]
-		[ValidateSet("STOP", "START", "TERMINATE")]
+		[ValidateSet("STOP", "START", "TERMINATE", "RESTART")]
 		[System.String]$State,
 
 		[Parameter()]
@@ -3438,6 +3509,13 @@ Function Update-EC2InstanceState {
 
 				break
 			}
+			"RESTART" {
+				$Result = Restart-EC2Instance -InstanceId $Instance.InstanceId -PassThru @Splat
+
+				$DesiredState = [Amazon.EC2.InstanceStateName]::Running
+
+				break
+			}
 			"TERMINATE" {
 				if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Terminated)
 				{
@@ -3457,7 +3535,7 @@ Function Update-EC2InstanceState {
 			}
 		}
 
-		if ($Wait)
+		if ($Wait -and $State -ne "RESTART")
 		{
 			Write-Host -Object "Waiting for EC2 instance $($Instance.InstanceId) to $State..."
 
@@ -3493,6 +3571,68 @@ Function Update-EC2InstanceState {
 }
 
 Function Update-EC2InstanceAmiId {
+	<#
+		.SYNOPSIS
+			Changes the AMI id of a currently launched instance.
+
+		.DESCRIPTION
+			The cmdlet stops the source EC2 instance, detaches its EBS volumes and ENIs (except eth0), terminates the instance, launches a new EC2 instance with the specified AMI id and any configuration items like sriovsupport enabled, stops it, deletes its EBS volumes, attaches the source volumes and ENIs, and restarts the new EC2 instance.
+
+		.PARAMETER InstanceId
+			The id of the instance to get.
+
+		.PARAMETER InstanceName
+			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
+
+		.PARAMETER NewAmiId
+			The new AMI id to launch the EC2 instance with.
+
+		.PARAMETER Timeout
+			The amount of time in seconds to wait for each action to succeed. This defaults to 600.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Update-EC2InstanceAmiId
+
+			Changes the AMI id being used for the specified instance
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			None
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/30/2017
+	#>
+	[CmdletBinding()]
 	Param(
 		[Parameter(Mandatory = $true)]
 		[ValidateNotNullOrEmpty()]
@@ -3540,7 +3680,6 @@ Function Update-EC2InstanceAmiId {
 	)
 
 	Begin {
-
 	}
 
 	Process {
@@ -3564,7 +3703,7 @@ Function Update-EC2InstanceAmiId {
 		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
 	
 		# Stop the source EC2 instance
-		Update-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
+		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
 
 		[PSCustomObject[]]$BlockDevices = @()
 
@@ -3623,7 +3762,7 @@ Function Update-EC2InstanceAmiId {
 		Write-Verbose -Message "Deleting the original instance."
 		Write-Host -Object "Original instance AMI id: $($Instance.ImageId)"
 
-		Update-EC2InstanceState -InstanceId $Instance.InstanceId -State TERMINATE -Wait -Timeout $Timeout @AwsUtilitiesSplat
+		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State TERMINATE -Wait -Timeout $Timeout @AwsUtilitiesSplat
 
 		# Build some optional parameters for New-EC2Instance
 		[System.Collections.Hashtable]$NewInstanceSplat = @{}
@@ -3711,11 +3850,11 @@ Launching new instance:
 
 		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $Temp.Instances[0].InstanceId @AwsUtilitiesSplat
 
-		Update-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Wait -Timeout $Timeout @AwsUtilitiesSplat
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Wait -Timeout $Timeout @AwsUtilitiesSplat
 
 		Write-Verbose -Message "Stopping new instance."
 
-		Update-EC2InstanceState -InstanceId $NewInstance.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
 
 		if (-not [System.String]::IsNullOrEmpty($Instance.SriovNetSupport))
 		{
@@ -3892,10 +4031,740 @@ Launching new instance:
 
 		Write-Verbose -Message "Starting instance."
 
-		Update-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START @AwsUtilitiesSplat 
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START @AwsUtilitiesSplat 
 	}
 
 	End {
 
+	}
+}
+
+Function Invoke-EnableCloudWatch {
+	<#
+		.SYNOPSIS
+			Enables CloudWatch Logs and custom metrics on the local EC2 instance.
+
+		.DESCRIPTION
+			The cmdlet uses SSM or EC2Config to enable CloudWatch Logs and custom metrics. If a bucket and key are specified, the json config file is downloaded and used to configure the service. If the SSMDocument is specified, it is used with a state manager association.
+
+			If null or empty values are provided to bucket or key, the cmdlet creates an empty configuration file and enables EC2Config to send logs and metrics, but does not configure any.
+
+		.PARAMETER Key
+			The key of the object in S3 that is the config document for CloudWatch, this should be AWS.EC2.Windows.CloudWatch.json with any additional prefixes.
+
+		.PARAMETER Bucket
+			The bucket containing the configuration document.
+
+		.PARAMETER SSMDocument
+			The SSM Document to associate with the EC2 instance to enable CloudWatch.
+
+		.PARAMETER RestartServices
+			If specified, initiates a restart of either the SSMAgent or EC2Config service so that the new settings take effect. The service restart is executed as a scheduled task run by the SYSTEM account to ensure it succeeds and to prevent terminating being denied terminating the service because it is currently executing a script with this cmdlet.
+
+		.EXAMPLE
+			Invoke-EnableCloudWatch -Key AWS.EC2.Windows.CloudWatch.json -Bucket ec2configs -RestartServices
+			
+			Downloads the file from S3 with pre-existing CloudWatch configurations and restarts the appropriate service depending on the version of Windows (either SSM Agent or EC2Config).
+
+		.INPUTS
+			None
+
+		.OUTPUTS 
+			None
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/30/2017
+			
+	#>
+	[CmdletBinding(DefaultParameterSetName = "LocalConfig")]
+	Param(
+		[Parameter(ParameterSetName = "LocalConfig")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Key,
+
+		[Parameter(ParameterSetName = "LocalConfig")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Bucket,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "SSM")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$SSMDocument,
+
+		[Parameter()]
+		[switch]$RestartServices
+	)
+
+	Begin {
+	}
+
+	Process {
+		try
+		{
+			[System.String]$CloudWatchLogConfigDestination = "$env:ProgramFiles\Amazon\Ec2ConfigService\Settings\AWS.EC2.Windows.CloudWatch.json"
+			[System.String]$EC2SettingsFile="$env:ProgramFiles\Amazon\Ec2ConfigService\Settings\Config.xml"
+
+			Write-Log -Message "Enabling CloudWatch Logs."
+
+			$AWSSoftware = Get-AWSSoftware
+			$SSMSoftware = $AWSSoftware | Where-Object -FilterScript {$_.DisplayName -eq "Amazon SSM Agent"} | Select-Object -First 1
+			$EC2ConfigSW = $AWSSoftware | Where-Object -FilterScript {$_.DisplayName -eq "EC2ConfigService"} | Select-Object -First 1
+
+			if ($SSMSoftware -ne $null -and -not [System.String]::IsNullOrEmpty($SSMDocument))
+			{
+				Write-Log -Message "Using SSM to configure CloudWatch."
+					
+				$ServiceName = "AmazonSSMAgent"
+
+				$InstanceId = Get-EC2InstanceId
+
+				try
+				{
+					Write-Log -Message "Updating SSM agent to latest."
+					New-SSMAssociation -InstanceId $InstanceId -Name "AWS-UpdateSSMAgent" -Force
+				}
+				catch [Amazon.SimpleSystemsManagement.Model.AssociationAlreadyExistsException]
+				{
+					Write-Log -Message "The AWS-UpdateSSMAgent association already exists."
+				}
+
+				try
+				{
+					Write-Log -Message "Associating CloudWatch SSM Document $SSMDocument."
+					New-SSMAssociation -Target  @{Key="instanceids"; Values=@($InstanceId)} -Name $SSMDocument -Parameter @{"status" = "Enabled"} -Force
+				}
+					catch [Amazon.SimpleSystemsManagement.Model.AssociationAlreadyExistsException]
+					{
+						Write-Log -Message "The $CloudWatchSSMDocument association already exists."
+					}
+				}
+				elseif ($EC2ConfigSW -ne $null)
+				{
+					$ServiceName = "EC2Config"
+
+					Write-Log -Message "EC2Config Service Version $($EC2ConfigSW.DisplayVersion)"
+
+					if (-not [System.String]::IsNullOrEmpty($Bucket) -and -not [System.String]::IsNullOrEmpty($Key))
+					{
+						Write-Log -Message "Downloading CloudWatch configuration file."
+			
+						Copy-S3Object -BucketName $Bucket -Key $Key -LocalFile $CloudWatchLogConfigDestination -Force
+					}
+
+					if (-not (Test-Path -Path $CloudWatchLogConfigDestination))
+					{
+						$Val = @"
+{
+  "IsEnabled": true,
+  "EngineConfiguration": {
+    "PollInterval": "00:00:05",
+    "Components": [
+	],
+    "Flows": {
+      "Flows": [
+      ]
+    }
+  }
+}
+"@
+						Set-Content -Path $CloudWatchLogConfigDestination -Value $Val -Force
+					}
+
+
+					# Version is 0xMMmmBBB
+					[System.String]$Hex = $EC2ConfigSW.Version.ToString("X")
+
+					# The major and minor values are stored little endian, so they need to be flipped
+					# The build number is stored big endian
+					$Hex = $Hex.Substring(1, 1) + $Hex.Substring(0, 1)
+					$Major = [System.Int32]::Parse($Hex.Substring(0, 2), [System.Globalization.NumberStyles]::HexNumber)
+
+					# For EC2Config less than version 4, enabling CloudWatch has to be done in the XML config
+					if ($Major -lt 4)
+					{
+						Write-Log -Message "Ensuring the IsEnabled property isn't present in the config file."
+
+						[PSCustomObject]$Obj = ConvertFrom-Json -InputObject (Get-Content -Path $CloudWatchLogConfigDestination -Raw)
+					
+						if ($Obj.Properties.Name -icontains "IsEnabled")
+						{
+							$Obj.Properties.Remove("IsEnabled")
+							Set-Content -Path $CloudWatchLogConfigDestination -Value (ConvertTo-Json -InputObject $Obj) -Force
+						}
+
+						Write-Log -Message "Retrieving EC2Config settings file."
+			
+						[System.Xml.XmlDocument]$Xml = Get-Content -Path $EC2SettingsFile
+						$Xml.Get_DocumentElement().Plugins.ChildNodes | Where-Object {$_.Name -eq "AWS.EC2.Windows.CloudWatch.PlugIn"} | ForEach-Object { $_.State = "Enabled"}
+			
+						Write-Log -Message "Saving updated settings file."
+						$Xml.Save($EC2SettingsFile)
+					}
+					# Othwerwise it is done in the CloudWatch json file and SSM uses it to deliver logs and metrics
+					else
+					{
+						Write-Log -Message "Ensuring the IsEnabled property is present and set to true in the config file."
+
+						[PSCustomObject]$Obj = ConvertFrom-Json -InputObject (Get-Content -Path $CloudWatchLogConfigDestination -Raw)
+					
+						$Obj.IsEnabled = $true
+						Set-Content -Path $CloudWatchLogConfigDestination -Value (ConvertTo-Json -InputObject $Obj) -Force
+
+						$ServiceName = "AmazonSSMAgent"
+					}
+
+					if (-not $Reboot)
+					{
+						try 
+						{
+							$RestartServiceTaskName = "Restart$ServiceName`Task"
+  
+							Write-Log -Message "Creating scheduled task to restart $ServiceName service."
+
+							if ((Get-ScheduledTask -TaskName $RestartServiceTaskName -ErrorAction SilentlyContinue) -ne $null) 
+							{
+								Unregister-ScheduledTask -TaskName $RestartServiceTaskName -Confirm:$false
+							}
+
+							$Command = @"
+try {					
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Executing scheduled task $RestartServiceTaskName, waiting 30 seconds for other actions to complete."
+	Start-Sleep -Seconds 30
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Removing script file at $PSCommandPath."
+	Remove-Item -Path "$PSCommandPath" -Force
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Restarting $ServiceName service."
+	Restart-Service -Name $ServiceName -Force
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Unregistering scheduled task."
+	Unregister-ScheduledTask -TaskName $RestartServiceTaskName -Confirm:`$false
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Successfully unregistered scheduled task, task complete."
+} 
+catch [Exception] {
+	Add-Content -Path "$script:LogPath" -Value "[ERROR] `$(Get-Date) : `$(`$_.Exception.Message)"
+	Add-Content -Path "$script:LogPath" -Value "[ERROR] `$(Get-Date) : `$(`$_.Exception.StackTrace)"
+}
+"@
+
+							$Bytes = [System.Text.Encoding]::Unicode.GetBytes($Command)
+							$EncodedCommand = [Convert]::ToBase64String($Bytes)
+        
+							$STParams = "-NonInteractive -WindowStyle Hidden -NoProfile -NoLogo -EncodedCommand $EncodedCommand"
+							$STSource =  "$env:SYSTEMROOT\System32\WindowsPowerShell\v1.0\powershell.exe"
+							$STAction = New-ScheduledTaskAction -Execute $STSource -Argument $STParams
+							$STPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+							$STSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -DontStopIfGoingOnBatteries -DontStopOnIdleEnd -MultipleInstances IgnoreNew
+                               
+							$ScheduledTask = Register-ScheduledTask -TaskName $RestartServiceTaskName -Action $STAction -Principal $STPrincipal -Settings $STSettings -ErrorAction Stop 
+							Start-ScheduledTask -TaskName $RestartServiceTaskName
+						}
+						catch [Exception] {
+							Write-Log -Message "Error running scheduled task to restart $ServiceName service." -ErrorRecord $_ -Level ERROR
+						}
+					}					
+				}
+				else
+				{
+					Write-Log -Message "The SSM Agent and the EC2Config service are both not installed, cannot configure CloudWatch." -Level WARNING
+				}
+			}
+			catch [Exception]
+			{
+				Write-Log -Message "Error configuring CloudWatch." -ErrorRecord $_ -Level ERROR
+			}
+		}
+
+		End {
+		}
+	}
+
+Function Get-AWSAmiMappings {
+	<#
+		.SYNOPSIS 
+			Gets the most current AMI image id for Windows and Amazon Linux instances in each region.
+
+		.DESCRIPTION
+			The cmdlet retrieves the most current AMI image id for Windows Server 2008 through Windows Server 2016 and Amazon Linux. The output is a	
+			json formatted string that is targetted for usage in a Mappings section in an AWS Cloudformation script.
+
+		.EXAMPLE
+			Get-AWSAmiMappings
+
+			Retrieves the AMI mappings for Windows Server and Amazon Linux.
+		
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.String
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/21/2017		
+	#>
+    [CmdletBinding()]
+    Param()
+
+    Begin {
+        $OperatingSystems = @{
+            WindowsServer2016 = "Windows_Server-2016-English-Full-Base-*"
+            WindowsServer2012R2 = "Windows_Server-2012-R2_RTM-English-64Bit-Base-*"
+            WindowsServer2012 = "Windows_Server-2012-RTM-English-64Bit-Base-*"
+            WindowsServer2008R2 = "Windows_Server-2008-R2_SP1-English-64Bit-Base-*"
+            WindowsServer2008 = "Windows_Server-2008-SP2-English-64Bit-Base-*"
+            AmazonLinux = "amzn-ami-hvm-*-gp2"
+        }
+    }
+
+    Process {
+        $Regions = Get-AWSRegion
+
+        [System.Collections.Hashtable]$Results = @{}
+
+        foreach ($Region in $Regions)
+        {
+            Write-Verbose -Message "Processing region $($Region.Region)."
+            [PSCustomObject]$RegionResults = [PSCustomObject]@{Name = $Region.Name}
+
+            $OperatingSystems.GetEnumerator() | Sort-Object -Property Key -Descending | ForEach-Object {
+                Write-Verbose -Message "Processing OS $($_.Key)."
+
+                [Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
+                $Filter.Name = "name"
+                $Filter.Value = $_.Value
+            
+                $Id = [System.String]::Empty
+                $Id = Get-EC2Image -Filter @($Filter) -Region $Region.Region -ErrorAction SilentlyContinue | Sort-Object -Property CreationDate -Descending | Select-Object -ExpandProperty ImageId -First 1
+
+                if (-not [System.String]::IsNullOrEmpty($Id))
+                {
+                    $RegionResults | Add-Member -MemberType NoteProperty -Name $_.Key -Value $Id
+                }
+            }
+
+           $Results.Add($Region.Region, $RegionResults)
+        }
+
+        ConvertTo-Json -InputObject ($Results | Sort-Object -Property Key)
+    }
+
+	End {
+	}
+}
+
+Function Invoke-AWSKMSEncryptString {
+	<#
+		.SYNOPSIS
+			Encrypts a plain text string with an AWS KMS key.
+
+		.DESCRIPTION
+			The cmdlet takes a plain text string and encrypts it with an AWS KMS key and returns back a Base 64 encoded string of the encrypted plain text.
+
+			Optionally, an Encryption Context hash table can be provided to include with the encrypted string.
+
+		.PARAMETER InputObject
+			The string to encrypt.
+
+		.PARAMETER Key
+			The Key Id (a string version of a GUID) or the Key alias.
+
+		.PARAMETER EncryptionContext
+			Name-value pair in a Hashtable that specifies the encryption context to be used for authenticated encryption. If used here, the same value must be supplied to the Decrypt API or decryption will fail.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Invoke-AWSEncryptString "MySecurePassword" -Key "c267f345-ef7a-40ff-95a0-a1b4dbeaac75" -EncryptionContext @{"UserName" = "john.smith"} 
+
+			Encrypts the password with the supplied encryption context and returns a base 64 string of the encrypted value.
+
+		.INPUTS
+			System.String
+
+		.OUTPUTS
+			System.Sting
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/21/2017
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[ValidateNotNull()]
+		[System.String]$InputObject,
+
+		[Parameter(Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Key,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.Collections.Hashtable]$EncryptionContext,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		try
+		{
+			[System.Byte[]]$Bytes = [System.Text.Encoding]::UTF8.GetBytes($InputObject)
+
+			[System.Collections.Hashtable]$ContextSplat = @{}
+
+			if ($EncryptionContext -ne $null -and $EncryptionContext.Count -gt 0)
+			{
+				$ContextSplat.EncryptionContext = $EncryptionContext
+			}
+
+			[System.IO.MemoryStream]$MStream = New-Object -TypeName System.IO.MemoryStream($Bytes, 0, $Bytes.Length)
+			[Amazon.KeyManagementService.Model.EncryptResponse]$Response = Invoke-KMSEncrypt -Plaintext $MStream -KeyId $Key @ContextSplat @Splat
+			
+			Write-Output -InputObject ([System.Convert]::ToBase64String($Response.CiphertextBlob.ToArray()))
+		}
+		finally
+		{
+			$MStream.Dispose()
+		}		
+	}
+
+	End {
+	}
+}
+
+Function Invoke-AWSKMSDecryptString {
+	<#
+		.SYNOPSIS
+			Decrypts a base 64 encoded string back to the original string.
+
+		.DESCRIPTION
+			The cmdlet takes a base 64 encoded, encrypted string and decrypts it back to plain text.
+
+			Optionally, an Encryption Context hash table can be provided to include with the encrypted string if it was provided during encryption.
+
+		.PARAMETER InputObject
+			The base 64 encoded string to decrypt.
+
+		.PARAMETER EncryptionContext
+			Name-value pair in a Hashtable that specifies the encryption context to be used for authenticated encryption. The same value must be supplied to the Decrypt API as was supplied to the Encrypt API or decryption will fail.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$EncryptedString = "AQICAHirjhAS1dnk3AqaAX8ebvOi+2yKjwR2lcRsjqKC0zRl/AFALrR6jZfasOcnKLdT+Y26AAAAbjBsBgkqhkiG9w0BBwagXzBdAgEAMFgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMJnfWdFgGqptS23pfAgEQgCtqQ6FoKrjSlZDUIPTVzdDNJ/BfbbnPtlux0o8b2ya0DxUVZ5hFHroXUyFF"
+			Invoke-AWSKMSDecryptString $EncryptedString -EncryptionContext @{"UserName" = "john.smith"} 
+
+			Decrypts the string with the supplied encryption context and returns the plain text string from the encrypted value.
+
+		.INPUTS
+			System.String
+
+		.OUTPUTS
+			System.Sting
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/21/2017
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[ValidateNotNull()]
+		[System.String]$InputObject,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.Collections.Hashtable]$EncryptionContext,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		try
+		{
+			[System.Byte[]]$Bytes = [System.Convert]::FromBase64String($InputObject)
+
+			[System.Collections.Hashtable]$ContextSplat = @{}
+
+			if ($EncryptionContext -ne $null -and $EncryptionContext.Count -gt 0)
+			{
+				$ContextSplat.EncryptionContext = $EncryptionContext
+			}
+
+			[System.IO.MemoryStream]$MStream = New-Object -TypeName System.IO.MemoryStream($Bytes, 0, $Bytes.Length)
+			[Amazon.KeyManagementService.Model.DecryptResponse]$Response = Invoke-KMSDecrypt -CipherTextBlob $MStream @ContextSplat @Splat
+			
+			Write-Output -InputObject ([System.Text.Encoding]::UTF8.GetString($Response.PlainText.ToArray()))
+		}
+		finally
+		{
+			$MStream.Dispose()
+		}		
+	}
+
+	End {
+	}
+}
+
+Function Get-AWSFederationLogonUrl {
+	<#
+		.SYNOPSIS
+			Generates a temporary url that allows a logon to the AWS Management Console with an assumed role.
+
+		.DESCRIPTION
+			The cmdlet builds a url that can be used to logon to the AWS Management Console. First, the provided role is assumed using the specified credentials (or uses the default credentials).
+			Then, the cmdlet retrieves a federation signin token and then creates the login url. The provided credentials do not need to exist in the same account as the specified role, they just 
+			need permissions to be able to perform the sts:AssumeRole action for the provide role ARN.
+
+		.PARAMETER RoleArn
+			The role in the account you want to assume and log into. This role must be assumed using long-term AWS credentials (not temporary credentials).
+
+		.PARAMETER Duration
+			How long the assumed role credentials are good for between 900 and 3600 seconds. Regardless of what value is specified, the resulting Url is always valid for 15 minutes.
+
+		.PARAMETER Issuer
+			The url of your custom authentication system. This will default to https://<AWS Account Id>.signin.aws.amazon.com.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Get-AWSFederationLogonUrl -RoleArn "arn:aws:iam::123456789012:role/AdministratorRole" -ProfileName mycredentialprofile
+			
+			Gets the AWS management console signin url for the AdministratorRole in the 123456789012 account.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.Sting
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/30/2017
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true)]
+		[System.String]$RoleArn,
+
+		[Parameter()]
+		[ValidateRange(900, 3600)]
+		[System.Int32]$Duration = 3600,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Issuer = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+		$Base = "https://signin.aws.amazon.com/federation"
+		$Destination = [System.Net.WebUtility]::UrlEncode("https://console.aws.amazon.com")
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		# Get caller identity
+		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @Splat
+
+		# Create the session name from the identity
+		$SessionName = "$($Identity.Account)-$($Identity.UserId)-$($Identity.Arn.Split("/")[-1])"
+		$SessionName = $SessionName.Substring(0, [System.Math]::Min(64, $SessionName.Length)) -replace "[^\\w +=,.@-]*",""
+		
+		# Assume the role in the remote account
+		[Amazon.SecurityToken.Model.AssumeRoleResponse]$Role = Use-STSRole -DurationInSeconds $Duration -RoleSessionName $SessionName -RoleArn $RoleArn @Splat
+
+		# Form the url to to get the signin token
+		$Url = "$Base`?Action=getSigninToken&SessionType=json&Session={`"sessionId`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.AccessKeyId))`",`"sessionKey`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SecretAccessKey))`",`"sessionToken`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SessionToken))`"}"
+
+		<# Get the token, it's in the form of
+		{
+			"SiginToken" : "UniqueStringHere"
+		}
+		#>
+		[System.Net.WebClient]$Client = New-Object -TypeName System.Net.WebClient
+
+		$Response = ConvertFrom-Json -InputObject $Client.DownloadString($Url)
+
+		# Set the issuer if it wasn't provided by the user
+		if ([System.String]::IsNullOrEmpty($Issuer))
+		{
+			$Issuer = "https://$($Identity.Account).signin.aws.amazon.com"
+		}
+
+		$Issuer = [System.Net.WebUtility]::UrlEncode($Issuer)		
+		$Token = [System.Net.WebUtility]::UrlEncode($Response.SigninToken)
+		$Action = "login"
+
+		# Create the signin url, it's valid for 15 minutes regardless of the duration of the assumed role
+		$Signin = "$Base`?Action=$Action&Issuer=$Issuer&Destination=$Destination&SigninToken=$Token"
+
+		Write-Output -InputObject $Signin
+	}
+
+	End {
 	}
 }

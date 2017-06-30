@@ -3,7 +3,7 @@
 ## Revision History
 
 ### 1.0.1.0
-Added Invoke-AWSNetworkAdapterFixOnOfflineDisk, Invoke-AWSNetworkAdapterFixOnRemoteInstance, Update-EC2InstanceAmiId, and Update-EC2InstanceState cmdlets.
+Added Invoke-AWSNetworkAdapterFixOnOfflineDisk, Invoke-AWSNetworkAdapterFixOnRemoteInstance, Update-EC2InstanceAmiId, Set-EC2InstanceState, Get-AWSAmiMappings, Invoke-EnableCloudWatch, Invoke-AWSKMSEncryptString, Invoke-AWSKMSDecryptString, and Get-AWSFederationLogonUrl cmdlets.
 
 ### 1.0.0.7
 Fixed minor bugs on mounting volumes with Copy-EBSVolume.
