@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.1.1
+Updated the Invoke-AWSNetworkAdapterFixOnOfflineDisk and Invoke-AWSNetworkAdapterFixOnRemoteInstance cmdlets.
+
 ### 1.0.1.0
 Added Invoke-AWSNetworkAdapterFixOnOfflineDisk, Invoke-AWSNetworkAdapterFixOnRemoteInstance, Update-EC2InstanceAmiId, Set-EC2InstanceState, Get-AWSAmiMappings, Invoke-EnableCloudWatch, Invoke-AWSKMSEncryptString, Invoke-AWSKMSDecryptString, and Get-AWSFederationLogonUrl cmdlets.
 

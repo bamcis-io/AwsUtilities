@@ -2327,7 +2327,7 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 			The drive letter where the offline root volume is mounted.
 
 		.PARAMETER AWSPVDriverPath
-			The path to the AWS PV Drivers msi installer or Citrix Xen drivers msi installer to copy to the offline system. This defaults to c:\AWSPVDriverSetup.msi.
+			The path to the AWS PV Drivers msi installer or Citrix Xen drivers exe installer to copy to the offline system.
 
 		.PARAMETER EnhancedNetworkingDriverPath
 			The path to the enhanced networking drivers applicable for the instance type being fixed. 
@@ -2355,19 +2355,11 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 		.PARAMETER TempSoftwareKey
 			The key used to mount the offline SOFTWARE registry hive in HKLM of the local machine. This defaults to AWSTempSoftware.
 
-		.PARAMETER UserName
-			The user name to use for the auto logon. This can be specified as domain\user, user@domain.com (UPN format), or just the username. If only a username
+		.PARAMETER Credential
+			The credentials to use for the auto logon. The user name can be specified as domain\user, user@domain.com (UPN format), or just the username. If only a username
 			is specified, provide the domain parameter, otherwise it will default to the offline machine computer name as specified in the computer's registry.
 
 			If the user is a domain user, a cached logon must be present to use it, as this cmdlet assumes the offline instance has no network connectivity.
-
-			The user must have local admin rights on the offline machine.
-
-		.PARAMETER Password
-			The password to be used for the auto logon corresponding to the provided user name.
-
-		.PARAMETER Credential
-			The credentials to use for the auto logon. See the UserName parameter for specifics on the username and domain requirements for the Credential UserName property.
 
 			The user must have local admin rights on the offline machine.
 
@@ -2379,13 +2371,16 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 		.PARAMETER RemoteLogPath
 			The path to a file on the target server logs are written to during the RunOnce script. Defaults to $env:SystemDrive\NetworkAdapterFix.log.
 
+		.PARAMETER OperatingSystem
+			If you specify a ref, this variable will be populated with the Windows Operating System version as a decimal value (i.e. 6.1, 6.2, 6.3, 10.0, etc) is returned so it can be used to evaluate other decisions
+
 		.EXAMPLE
-			Invoke-FixAWSNetworkAdaptersOnOfflineDisk -DriveLetter 'e' -EnhancedNetworkingDriverPath c:\ENA -EnhancedNetworkingType ENA -UserName "contoso\john.smith" -Password (ConvertTo-SecureString -String "MyS3cureP@$$word" -AsPlainText -Force)
+			Invoke-AWSNetworkAdapterFixOnOfflineDisk -DriveLetter 'e' -EnhancedNetworkingDriverPath c:\ENA -EnhancedNetworkingType ENA -UserName "contoso\john.smith" -Password (ConvertTo-SecureString -String "MyS3cureP@$$word" -AsPlainText -Force)
 
 			The cmdlet is executed against a mounted EBS root volume at "e:\" and is from an instance type that uses the Elastic Network Adapter.
 
 		.EXAMPLE
-			Invoke-FixAWSNetworkAdaptersOnOfflineDisk -DriveLetter 'e' -EnhancedNetworkingDriverPath c:\IntelDrivers -EnhancedNetworkingType Intel82599VF -Credential (Get-Credential)
+			Invoke-AWSNetworkAdapterFixOnOfflineDisk -DriveLetter 'e' -EnhancedNetworkingDriverPath c:\IntelDrivers -EnhancedNetworkingType Intel82599VF -Credential (Get-Credential)
 
 			The cmdlet is executed against a mounted EBS root volume at "e:\" and is from an instance type that uses the SR IOV support. The credentials to execute the AutoLogon and RunOnce script are prompted.
 
@@ -2397,28 +2392,29 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 6/12/2017
+			LAST UPDATE: 7/13/2017
 	#>
 	[CmdletBinding()]
 	Param(
 		[Parameter(Mandatory = $true)]
 		[System.Char]$DriveLetter,
 
-		[Parameter()]
+		[Parameter(ParameterSetName = "PV", Mandatory = $true)]
+		[Parameter(ParameterSetName = "ENA")]
 		[ValidateScript({
 			Test-Path -Path $_
 		})]
-		[System.String]$AWSPVDriverPath = "c:\AWSPVDriverSetup.msi",
+		[System.String]$AWSPVDriverPath = [System.String]::Empty,
 
-		[Parameter()]
+		[Parameter(ParameterSetName = "ENA", Mandatory = $true)]
 		[ValidateScript({
 			Test-Path -Path $_
 		})]
-		[System.String]$EnhancedNetworkingDriverPath = [System.String]::Empty,
+		[System.String]$EnhancedNetworkingDriverPath,
 
-		[Parameter()]
-		[ValidateSet("Intel82599VF", "ENA", "", $null)]
-		[System.String]$EnhancedNetworkingType = [System.String]::Empty,
+		[Parameter(ParameterSetName = "ENA", Mandatory = $true)]
+		[ValidateSet("Intel82599VF", "ENA")]
+		[System.String]$EnhancedNetworkingType,
 
 		[Parameter()]
 		[ValidateNotNullOrEmpty()]
@@ -2428,15 +2424,7 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 		[ValidateNotNullOrEmpty()]
 		[System.String]$TempSoftwareKey = "AWSTempSoftware",
 
-		[Parameter(ParameterSetName = "Username")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$UserName,
-
-		[Parameter(ParameterSetName = "Username")]
-		[ValidateNotNull()]
-		[System.Security.SecureString]$Password,
-
-		[Parameter(ParameterSetName = "Credential")]
+		[Parameter()]
 		[ValidateNotNull()]
 		[System.Management.Automation.Credential()]
 		[System.Management.Automation.PSCredential]$Credential = [System.Management.Automation.PSCredential]::Empty,
@@ -2447,7 +2435,14 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 
 		[Parameter()]
 		[ValidateNotNullOrEmpty()]
-		[System.String]$RemoteLogPath = "`$env:SystemDrive\NetworkAdapterFix.log"
+		[System.String]$RemoteLogPath = "`$env:SystemDrive\NetworkAdapterFix.log",
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[ValidateScript({
+			$_.Value.GetType() -eq [System.Decimal]
+		})]
+		[ref]$OperatingSystem
 	)
 
 	Begin {
@@ -2458,19 +2453,7 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 	}
 
 	Process {
-		# Copy over drivers
-		# Use xcopy instead of Copy-Item because the cmdlet sometimes does not recognize the mounted drive if it was called
-		# from another command, thus the procedure fails
-		Write-Verbose -Message "Copying PV Drivers"
-		& xcopy $AWSPVDriverPath "$DriveLetter`:\" /Y | Out-Null
-
-		if (-not [System.String]::IsNullOrEmpty($EnhancedNetworkingDriverPath))
-		{
-			[System.String]$ENADriversPath = "$DriveLetter`:\EnhancedNetworking"
-			Write-Verbose -Message "Copying enhanced networking drivers to $ENADriversPath"
-			& xcopy $EnhancedNetworkingDriverPath "$ENADriversPath\*" /Y /E | Out-Null
-		}
-
+		
 		# PART 1 - Fixes a broken NIC that has been disabled by the Plug and Play Cleanup Feature
 		Write-Verbose -Message "Configuring existing PV driver registry settings"
 		try
@@ -2480,7 +2463,7 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 			$Temp = & reg load "HKLM\$TempSystemKey" "$SysDrive"
     
 			Write-Verbose -Message "Creating new PSDrive"
-			$Temp = New-PSDrive -Name $TempSystemKey -PSProvider Registry -Root "HKLM\$TempSystemKey"
+			$Temp = New-PSDrive -Name $TempSystemKey -PSProvider Registry -Root "HKLM\$TempSystemKey" -ErrorAction Stop
 
 			# http://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/pvdrivers-troubleshooting.html#plug-n-play-script
 
@@ -2567,14 +2550,59 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 
 			$Temp = & reg load "HKLM\$TempSoftwareKey" "$SoftDrive"
 
-			$Temp = New-PSDrive -Name $TempSoftwareKey -PSProvider Registry -Root "HKLM\$TempSoftwareKey"
+			$Temp = New-PSDrive -Name $TempSoftwareKey -PSProvider Registry -Root "HKLM\$TempSoftwareKey" -ErrorAction Stop
 
-			$WinNTCurrentVersionPath = "$TempSoftwareKey`:\Microsoft\Windows NT\CurrentVersion"
-			$RunOncePath = "$TempSoftwareKey`:\Microsoft\Windows\CurrentVersion\RunOnce"
-			$AWSPVRegPath = "$TempSoftwareKey`:\Wow6432Node\Amazon\AWSPVDriverSetup"
+			# Used to disable the shutdown event tracker
+			$PoliciesWinNTPath = "$TempSoftwareKey`:\Policies\Microsoft\Windows NT"
+			$PoliciesReliabilityPath = "$PoliciesWinNTPath\Reliability"
+
+			$WinNTPath = "$TempSoftwareKey`:\Microsoft\Windows NT"
+
+			# Used to find the operating system version
+			$WinNTCurrentVersionPath = "$WinNTPath\CurrentVersion"
+
+			# Used to set the auto logon parameters
 			$WinLogonPath = "$WinNTCurrentVersionPath\Winlogon"
-	
-			# Add the RunOnce task for the enhanced networking driver
+
+			# Used to set the run once scripts
+			$RunOncePath = "$TempSoftwareKey`:\Microsoft\Windows\CurrentVersion\RunOnce"
+
+			# Used to disable the domain controller check if the server is a DC
+			$AWSPVRegPath = "$TempSoftwareKey`:\Wow6432Node\Amazon\AWSPVDriverSetup"
+
+			# Handle the username being provided as domain\username, domain.com\username, and UPN as username@domain.com
+			$UserName = $Credential.UserName
+
+			if ($UserName.Contains("\"))
+			{
+				[System.String[]]$Parts = $UserName.Split("\")
+				$UserName = $Parts[1]
+				$Domain = $Parts[0].Split(".")[0]
+			}
+			elseif ($UserName.Contains("@"))
+			{
+				[System.String[]]$Parts = $UserName.Split("@")
+				$UserName = $Parts[0]
+				$Domain = $Parts[1].Split(".")[0]
+			}
+			else
+			{
+				$UserName = $Credential.UserName
+				$Domain = $ComputerName
+			}
+
+			[System.IntPtr]$UnmanagedString = [System.IntPtr]::Zero
+			[System.String]$PlainPassword = [System.String]::Empty
+
+			try
+			{	
+				$UnmanagedString = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($Credential.Password)
+				$PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($UnmanagedString)
+			}
+			finally
+			{
+				[System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($UnmanagedString)
+			}
 
 			# Test for the version of windows to determine the enhanced networking driver to use
 			[System.Int32]$CurrentMajor = Get-ItemProperty -Path $WinNTCurrentVersionPath -Name "CurrentMajorVersionNumber" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty CurrentMajorVersionNumber
@@ -2593,22 +2621,59 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 				$OSVersion = "$CurrentMajor$CurrentMinor"
 			}
 
+
+			# Populate the OS version if specified
+			if ($PSBoundParameters.ContainsKey("OperatingSystem"))
+			{
+				if (-not [System.String]::IsNullOrEmpty($OSVersion))
+				{
+					[System.Decimal]$Version = 0
+					if ([System.Decimal]::TryParse($OSVersion.Insert( $(if ($OSVersion.Length -gt 1) { $OSVersion.Length - 1 } else { 1 }), "."), [ref]$Version))
+					{
+						$OperatingSystem.Value = $Version
+					}
+					else
+					{
+						$OperatingSystem.Value = 0
+					}
+				}
+				else
+				{
+					$OperatingSystem.Value = 0
+				}
+			}
+
+			$Keys = @(@{Key = "AutoAdminLogon"; Value = 1}, @{Key = "DefaultDomainName"; Value = $Domain }, @{Key = "DefaultPassword"; Value = $PlainPassword}, @{Key = "DefaultUserName"; Value = $UserName})
+
 			[System.String]$FixItScriptName = "FixItScript_$([Guid]::NewGuid()).ps1"
 			# Used if we want to execute a bat file from the runonce script that contains a call to the PowerShell
 			# [System.String]$FixItScriptName = "FixItScript_$([Guid]::NewGuid()).bat"
 
-			[System.String]$RunOnceScript = "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Starting runonce script.`"`r`n"
-			
+			# Set up the run once script for the remote machine
+			[System.String]$RunOnceScript = "[System.Guid]`$PathGuid = [System.Guid]::NewGuid()`r`n"
 			$RunOnceScript += "`$ErrorActionPreference = `"Stop`"`r`n"
+			$RunOnceScript += "[System.IO.FileInfo]`$LogInfo = New-Object -TypeName System.IO.FileInfo(`"$RemoteLogPath`")`r`n"
+			$RunOnceScript += "[System.String]`$LogPath = `"`$(`$LogInfo.DirectoryName)\`$(`$LogInfo.BaseName)_`$(`$PathGuid.ToString())`$(`$LogInfo.Extension)`"`r`n"
+			$RunOnceScript += "Start-Transcript -Path `"`$env:SystemDrive\Transcript.txt`"`r`n"
+			$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Starting runonce script, id `$(`$PathGuid.ToString()).`"`r`n"			
+			$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Current user context: `$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)`"`r`n"
 			$RunOnceScript += "try {`r`n"
 
-			if (-not [System.String]::IsNullOrEmpty($EnhancedNetworkingType) -and -not [System.String]::IsNullOrEmpty($EnhancedNetworkingDriverPath))
+			# Add the RunOnce task for the enhanced networking driver
+			if ($PSCmdlet.ParameterSetName -eq "ENA")
 			{
+				# Copy over drivers
+				# Use xcopy instead of Copy-Item because the cmdlet sometimes does not recognize the mounted drive if it was called
+				# from another command, thus the procedure fails
+				[System.String]$ENADriversPath = "$DriveLetter`:\EnhancedNetworking"
+				Write-Verbose -Message "Copying enhanced networking drivers to $ENADriversPath"
+				& xcopy $EnhancedNetworkingDriverPath "$ENADriversPath\*" /Y /E | Out-Null
+
 				switch ($EnhancedNetworkingType)
 				{
 					"Intel82599VF" {
 						Write-Verbose -Message "Setting up pnputil for INTEL drivers."
-						$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Running pnputil for INTEL drivers.`"`r`n"
+						$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Running pnputil for INTEL drivers.`"`r`n"
 						
 						switch ($OSVersion)
 						{
@@ -2647,7 +2712,7 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 					"ENA" {
 						Write-Verbose -Message "Setting up pnputil for ENA drivers."
 
-						$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Running pnputil for ENA drivers.`"`r`n"
+						$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Running pnputil for ENA drivers.`"`r`n"
 
 						switch ($OSVersion)
 						{
@@ -2684,187 +2749,203 @@ Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 					}
 				}
 			}
-			else
+					
+			if ($PSCmdlet.ParameterSetName -eq "PV" -or $PSBoundParameters.ContainsKey("AWSPVDriverPath"))
 			{
-				Write-Verbose -Message "No enhanced networking parameters specified, skipping installing enhanced networking drivers."
-			}
+				# Copy over drivers
+				# Use xcopy instead of Copy-Item because the cmdlet sometimes does not recognize the mounted drive if it was called
+				# from another command, thus the procedure fails
+				Write-Verbose -Message "Copying PV Drivers"
+				& xcopy $AWSPVDriverPath "$DriveLetter`:\" /Y | Out-Null
+			
+				# Add the runonce task to run the PV driver installer
 
-			# Add the runonce task to run the PV driver installer
+				[System.IO.FileInfo]$DriverInfo = New-Object -TypeName System.IO.FileInfo($AWSPVDriverPath)
 
-			[System.IO.FileInfo]$DriverInfo = New-Object -TypeName System.IO.FileInfo($AWSPVDriverPath)
+				[System.String]$DriverInstallCommand = [System.String]::Empty
 
-			[System.String]$DriverInstallCommand = [System.String]::Empty
-
-			switch ($DriverInfo.Extension.ToLower())
-			{
-				".msi" {
-					# We know we copied the installer to the root of the c:\ drive
-					$DriverInstallCommand = "Start-Process -FilePath `"msiexec.exe`" -ArgumentList @(`"/i ```"`$env:SystemDrive\$($DriverInfo.Name)```"`", `"/qn`", `"/norestart`", `"/L*V `$env:SystemDrive\AWSPVDriverInstall.log`") -Wait -ErrorAction Stop`r`n"
-					break
-				}
-				".exe" {
-					# We know we copied the installer to the root of the c:\ drive
-					$DriverInstallCommand = "Start-Process -FilePath `"`$env:SystemDrive\$($DriverInfo.Name)`" -ArgumentList @(`"/q`") -Wait -ErrorAction Stop`r`n"
-					break
-				}
-				default {
-					Write-Warning -Message "[WARNING] Unknown file extension $($DriverInfo.Extension) for driver installer."
-					break
-				}
-			}
-
-			# Handle the username being provided as domain\username, domain.com\username, and UPN as username@domain.com
-			if ($PSCmdlet.ParameterSetName -eq "Credential")
-			{
-				$UserName = $Credential.UserName
-				$Password = $Credential.Password
-			}
-
-			if ($UserName.Contains("\"))
-			{
-				[System.String[]]$Parts = $UserName.Split("\")
-				$UserName = $Parts[1]
-				$Domain = $Parts[0].Split(".")[0]
-			}
-			elseif ($UserName.Contains("@"))
-			{
-				[System.String[]]$Parts = $UserName.Split("@")
-				$UserName = $Parts[0]
-				$Domain = $Parts[1].Split(".")[0]
-			}
-			else
-			{
-				$UserName = $Credential.UserName
-				$Domain = $ComputerName
-			}
-
-			[System.IntPtr]$UnmanagedString = [System.IntPtr]::Zero
-			[System.String]$PlainPassword = [System.String]::Empty
-
-			try
-			{	
-				$UnmanagedString = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($Password)
-				$PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($UnmanagedString)
-			}
-			finally
-			{
-				[System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($UnmanagedString)
-			}
-
-			$Keys = @(@{Key = "AutoAdminLogon"; Value = 1}, @{Key = "DefaultDomainName"; Value = $Domain }, @{Key = "DefaultPassword"; Value = $PlainPassword}, @{Key = "DefaultUserName"; Value = $UserName})
-
-			# WinNT = Workstation
-			# LanmanNT = Domain Controller
-			# ServerNT = Member Server
-
-			if (-not [System.String]::IsNullOrEmpty($DriverInstallCommand))
-			{
-				Write-Verbose -Message "The attached drive is from server type: $ProductType"
-
-				if ($ProductType -eq "LanmanNT")
+				switch ($DriverInfo.Extension.ToLower())
 				{
-					# http://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/Upgrading_PV_drivers.html#aws-pv-upgrade-dc
-					Write-Verbose -Message "The server is a domain controller, updating boot options and installation parameters for the PV Drivers"
+					".msi" {
+						$DriverInstallCommand += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Killing all msiexec processes before running driver installation.`"`r`n"
+						$DriverInstallCommand += "Get-Process -Name msiexec -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue`r`n"
+						# We know we copied the installer to the root of the c:\ drive
+						$DriverInstallCommand += "Start-Process -FilePath `"msiexec.exe`" -ArgumentList @(`"/i ```"`$env:SystemDrive\$($DriverInfo.Name)```"`", `"/qn`", `"/norestart`", `"/L*V `$env:SystemDrive\AWSPVDriverInstall.log`") -Wait -ErrorAction Stop`r`n"
+						break
+					}
+					".exe" {
+						$DriverInstallCommand += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Killing all $($DriverInfo.BaseName) processes before running driver installation.`"`r`n"
+						$DriverInstallCommand += "`$Processes = Get-Process -Name `"*$($DriverInfo.BaseName)*`" -ErrorAction SilentlyContinue`r`n"
+						$DriverInstallCommand += "if (`$Processes -ne `$null -and `$Processes.Count -gt 0) {`r`n"
+						$DriverInstallCommand += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : There are `$(`$Processes.Count) existing processes.`"`r`n"
+						$DriverInstallCommand += "`$Processes | ForEach-Object { Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : `$(`$_.Name) : `$(`$_.Id)`" }`r`n"
+						$DriverInstallCommand += "`$Processes | Stop-Process -Force -ErrorAction Stop`r`n"
+						$DriverInstallCommand += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Processes have been killed, launching the installer.`"`r`n"
+						$DriverInstallCommand += "}`r`n"
+						# We know we copied the installer to the root of the c:\ drive
+						
+						<# This probably isn't needed, the citrix install doesn't provide any command line output
+						$DriverInstallCommand += "[System.Diagnostics.Process]`$Process = New-Object -TypeName System.Diagnostics.Process`r`n"
+						$DriverInstallCommand += "`$Process.StartInfo.RedirectStandardOutput = `$true`r`n"
+						$DriverInstallCommand += "`$Process.StartInfo.RedirectStandardError = `$true`r`n"
+						$DriverInstallCommand += "`$Process.StartInfo.FileName = `"`$env:SystemDrive\$($DriverInfo.Name)`"`r`n"
+						$DriverInstallCommand += "`$Process.StartInfo.Arguments = @(`"/S`", `"/norestart`")`r`n"
+						$DriverInstallCommand += "`$Process.StartInfo.UseShellExecute = `$false`r`n"
+						$DriverInstallCommand += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Starting installer now.`"`r`n"
+						$DriverInstallCommand += "`$Process.Start() | Out-Null`r`n"
+						$DriverInstallCommand += "while (!`$Process.HasExited) {`r`n"
+						$DriverInstallCommand += "while (![System.String]::IsNullOrEmpty((`$Line = `$Process.StandardOutput.ReadLine()))) {`r`n"
+						$DriverInstallCommand += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : `$Line`"`r`n"
+						$DriverInstallCommand += "}`r`n"
+						$DriverInstallCommand += "Start-Sleep -Milliseconds 10`r`n"
+						$DriverInstallCommand += "}`r`n"
+						$DriverInstallCommand += "if (`$Process.ExitCode -ne 0) {`r`n"
+						$DriverInstallCommand += "`$Line = `$Process.StandardError.ReadToEnd()`r`n"
+						$DriverInstallCommand += "if (![System.String]::IsNullOrEmpty(`$Line)) {`r`n"
+						$DriverInstallCommand += "Add-Content -Path `$LogPath -Value `"[ERROR] `$(Get-Date) : `$Line`"`r`n"
+						$DriverInstallCommand += "}`r`n"
+						$DriverInstallCommand += "}`r`n"
+						$DriverInstallCommand += "else {`r`n"
+						$DriverInstallCommand += "`$Line = `$Process.StandardOutput.ReadToEnd()`r`n"
+						$DriverInstallCommand += "if (![System.String]::IsNullOrEmpty(`$Line)) {`r`n"
+						$DriverInstallCommand += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : `$Line`"`r`n"
+						$DriverInstallCommand += "}`r`n"
+						$DriverInstallCommand += "}`r`n"
+						#>
 
-					$Temp = Set-ItemProperty -Path $AWSPVRegPath -Type ([Microsoft.Win32.RegistryValueKind]::String) -Name "DisableDCCheck" -Value "true" -Force
+						$DriverInstallCommand += "Start-Process -FilePath `"`$env:SystemDrive\$($DriverInfo.Name)`" -ArgumentList @(`"/S`",`"/norestart`") -Wait -ErrorAction Stop`r`n"
+						$DriverInstallCommand += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Completed installer.`"`r`n"
+						break
+					}
+					default {
+						Write-Warning -Message "[WARNING] Unknown file extension $($DriverInfo.Extension) for driver installer."
+						break
+					}
+				}
 
-					$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Adding bcd entry for a domain controller.`"`r`n"
-					
-					# This will get run at next boot so that when the PV drivers install and force a reboot, it will boot fine
-					$RunOnceScript += "& bcdedit /set {default} safeboot dsrepair`r`n"
-					
-					# Build a second runonce script to execute after all the fixes have been made, so the first runonce script
-					# will modify the BCD so after the reboot it goes into dsrepair mode to complete the driver install as a domain
-					# controller won't boot if the NTDS.dit file is missing, which it could be if it is on a non-root volume, and the driver
-					# install will only make the root volume available until the install completes.
-					#
-					# The second runonce script deletes the dsrepair boot mode entry, removes the auto logon, and reboots the server again, so
-					# in this scenario, two reboots are executed
+				# WinNT = Workstation
+				# LanmanNT = Domain Controller
+				# ServerNT = Member Server
 
-					[System.String]$SecondFixItScriptName = "FixItScript_$([Guid]::NewGuid()).ps1"
+				if (-not [System.String]::IsNullOrEmpty($DriverInstallCommand))
+				{
+					Write-Verbose -Message "The attached drive is from server type: $ProductType"
 
-					$SecondRunOnceScript = "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Executing second runonce script for domain controllers.`"`r`n"
-					$SecondRunOnceScript += "try {`r`n"
-					$SecondRunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Deleting safeboot bcd entry.`"`r`n"
-					$SecondRunOnceScript += "& bcdedit /deletevalue safeboot`r`n"
-
-					foreach ($Item in $Keys)
+					if ($ProductType -eq "LanmanNT")
 					{
-						# This will ensure the auto login keys are removed on the next reboot, 
-						$SecondRunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Removing $($Item.Key) from Winlogon.`"`r`n"
-						$SecondRunOnceScript += "Remove-ItemProperty -Name `"$($Item.Key)`" -Path `"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon`" -Force -ErrorAction Continue`r`n" 
+						# http://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/Upgrading_PV_drivers.html#aws-pv-upgrade-dc
+						Write-Verbose -Message "The server is a domain controller, updating boot options and installation parameters for the PV Drivers"
+
+						$Temp = Set-ItemProperty -Path $AWSPVRegPath -Type ([Microsoft.Win32.RegistryValueKind]::String) -Name "DisableDCCheck" -Value "true" -Force
+
+						$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Adding bcd entry for a domain controller.`"`r`n"
+					
+						# This will get run at next boot so that when the PV drivers install and force a reboot, it will boot fine
+						$RunOnceScript += "& bcdedit /set {default} safeboot dsrepair`r`n"
+					
+						# Build a second runonce script to execute after all the fixes have been made, so the first runonce script
+						# will modify the BCD so after the reboot it goes into dsrepair mode to complete the driver install as a domain
+						# controller won't boot if the NTDS.dit file is missing, which it could be if it is on a non-root volume, and the driver
+						# install will only make the root volume available until the install completes.
+						#
+						# The second runonce script deletes the dsrepair boot mode entry, removes the auto logon, and reboots the server again, so
+						# in this scenario, two reboots are executed
+
+						[System.String]$SecondFixItScriptName = "FixItScript_$([Guid]::NewGuid()).ps1"
+
+						$SecondRunOnceScript = "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Executing second runonce script for domain controllers.`"`r`n"
+						$SecondRunOnceScript += "try {`r`n"
+						$SecondRunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Deleting safeboot bcd entry.`"`r`n"
+						$SecondRunOnceScript += "& bcdedit /deletevalue safeboot`r`n"
+
+						foreach ($Item in $Keys)
+						{
+							# This will ensure the auto login keys are removed on the next reboot, 
+							$SecondRunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Removing $($Item.Key) from Winlogon.`"`r`n"
+							$SecondRunOnceScript += "Remove-ItemProperty -Name `"$($Item.Key)`" -Path `"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon`" -Force -ErrorAction Continue`r`n" 
+						}
+
+						$SecondRunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Rebooting.`"`r`n"
+						$SecondRunOnceScript += "Remove-Item -Path `"`$env:SystemDrive\$SecondFixItScriptName`" -Force`r`n"
+						$SecondRunOnceScript += "Restart-Computer -Force`r`n"
+						$SecondRunOnceScript += "}`r`ncatch [Exception] {`r`nAdd-Content -Path `$LogPath -Value `"[ERROR] `$(Get-Date) : `$(`$_.Exception.Message)`"`r`n}"
+
+						Write-Verbose -Message "Saving second run once script:`r`n$SecondRunOnceScript"
+						Set-Content -Path "$DriveLetter`:\$SecondFixItScriptName" -Value $SecondRunOnceScript -Force
+
+						# This will add a new RunOnce item at the next boot to remove the bcd entry after the following reboot
+						$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Creating runonce registry entry with a script to delete BCD entry on next boot.`"`r`n"				
+						$RunOnceScript += "Set-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce -Name `"!*DeleteBCDEntry`" -Value `"c:\Windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Unrestricted -File ```"c:\$SecondFixItScriptName```"`"`r`n"
+					}
+					else
+					{
+						# Otherwise, we can remove the auto login keys after the first reboot since no further logins will be needed to execute scripts
+
+						$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Removing auto logon registry entries.`"`r`n"
+					
+						foreach ($Item in $Keys)
+						{
+							# This will ensure the auto login keys are removed on the next reboot, we only want to do this if the server is not a
+							# domain controller, because if it is, we want one more auto login to run the runonce commands to delete the bcd entry
+							$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Removing $($Item.Key) from Winlogon.`"`r`n"
+							$RunOnceScript += "Remove-ItemProperty -Name `"$($Item.Key)`" -Path `"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon`" -Force -ErrorAction Continue`r`n" 
+						}
 					}
 
-					$SecondRunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Rebooting.`"`r`n"
-					$SecondRunOnceScript += "Remove-Item -Path `"`$env:SystemDrive\$SecondFixItScriptName`" -Force`r`n"
-					$SecondRunOnceScript += "Restart-Computer -Force`r`n"
-					$SecondRunOnceScript += "}`r`ncatch [Exception] {`r`nAdd-Content -Path `"$RemoteLogPath`" -Value `"[ERROR] `$(Get-Date) : `$(`$_.Exception.Message)`"`r`n}"
-
-					Write-Verbose -Message "Saving second run once script:`r`n$SecondRunOnceScript"
-					Set-Content -Path "$DriveLetter`:\$SecondFixItScriptName" -Value $SecondRunOnceScript -Force
-
-					# This will add a new RunOnce item at the next boot to remove the bcd entry after the following reboot
-					$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Creating runonce registry entry with a script to delete BCD entry on next boot.`"`r`n"				
-					$RunOnceScript += "Set-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce -Name `"!*DeleteBCDEntry`" -Value `"c:\Windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Unrestricted -File ```"c:\$SecondFixItScriptName```"`"`r`n"
+					# Adds a RunOnce command to install the PV driver, do it last since we need to reboot afterwards
+					$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Running driver install.`"`r`n"
+					$RunOnceScript += $DriverInstallCommand
 				}
 				else
 				{
-					# Otherwise, we can remove the auto login keys after the first reboot since no further logins will be needed to execute scripts
-
-					$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Removing auto logon registry entries.`"`r`n"
-					
-					foreach ($Item in $Keys)
-					{
-						# This will ensure the auto login keys are removed on the next reboot, we only want to do this if the server is not a
-						# domain controller, because if it is, we want one more auto login to run the runonce commands to delete the bcd entry
-						$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Removing $($Item.Key) from Winlogon.`"`r`n"
-						$RunOnceScript += "Remove-ItemProperty -Name `"$($Item.Key)`" -Path `"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon`" -Force -ErrorAction Continue`r`n" 
-					}
+					Write-Verbose -Message "No NIC driver installation setup, which means the installer file wasn't an msi or exe."
 				}
-
-				# Adds a RunOnce command to install the PV driver, do it last since we need to reboot afterwards
-				$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Running driver install.`"`r`n"
-				$RunOnceScript += $DriverInstallCommand
-				$RunOnceScript += "Add-Content -Path `"$RemoteLogPath`" -Value `"[INFO] `$(Get-Date) : Completed driver install, rebooting.`"`r`n"
-				$RunOnceScript += "Remove-Item -Path `"`$env:SystemDrive\$FixItScriptName`" -Force -ErrorAction Stop`r`n"				
-				$RunOnceScript += "Restart-Computer -Force`r`n"
-				$RunOnceScript += "}`r`ncatch [Exception] {`r`nAdd-Content -Path `"$RemoteLogPath`" -Value `"[ERROR] `$(Get-Date) : `$(`$_.Exception.Message)`"`r`n}"
 			}
-			else
+
+			# Disable Shutdown Event Tracker so that it doesn't interfere with runonce script
+			Write-Verbose -Message "Disabling the Shutdown Event Tracker so it doesn't stall logon."
+
+			if (-not (Test-Path -Path $PoliciesReliabilityPath))
 			{
-				Write-Verbose -Message "No NIC driver installation setup, which means the installer file wasn't an msi or exe."
+				Write-Verbose -Message "Creating Reliability key at $PoliciesWinNTPath."
+				New-Item -Path $PoliciesWinNTPath -Name "Reliability" -Force | Out-Null
+				Write-Verbose -Message "Successfully created key: $(Test-Path -Path $PoliciesReliabilityPath)"
 			}
 
-			if (-not [System.String]::IsNullOrEmpty($RunOnceScript))
+			Set-ItemProperty -Path $PoliciesReliabilityPath -Name "ShutdownReasonUI" -Value 0 -Type ([Microsoft.Win32.RegistryValueKind]::DWord)
+			Set-ItemProperty -Path $PoliciesReliabilityPath -Name "ShutdownReasonOn" -Value 0 -Type ([Microsoft.Win32.RegistryValueKind]::DWord)
+
+			# Finish the run once script content
+
+			$RunOnceScript += "Add-Content -Path `$LogPath -Value `"[INFO] `$(Get-Date) : Completed driver install, rebooting.`"`r`n"
+			# $RunOnceScript += "Remove-Item -Path `"`$env:SystemDrive\$FixItScriptName`" -Force -ErrorAction Stop`r`n"				
+			$RunOnceScript += "Restart-Computer -Force`r`n"
+			$RunOnceScript += "}`r`ncatch [Exception] {`r`nAdd-Content -Path `$LogPath -Value `"[ERROR] `$(Get-Date) : `$(`$_.Exception.Message)`"`r`n}"
+
+			Write-Verbose -Message "Setting up auto logon."
+
+			# Add the winlogon autologon keys
+			foreach ($Item in $Keys)
 			{
-				Write-Verbose -Message "Setting up auto logon."
-
-				# Add the winlogon autologon keys
-				foreach ($Item in $Keys)
-				{
-					$Temp = Set-ItemProperty -Path $WinLogonPath -Name $Item.Key -Value $Item.Value -Type ([Microsoft.Win32.RegistryValueKind]::String) -Force
-				}
-
-				Write-Verbose -Message "Completed setting up auto logon."
-
-				Write-Verbose -Message "The run once script to be executed:`r`n$RunOnceScript"
-
-				# $Bytes = [System.Text.Encoding]::Unicode.GetBytes($RunOnceScript)
-				# $EncodedCommand = [Convert]::ToBase64String($Bytes)
-
-				# This is for running as a BAT
-				# Set-Content -Path "$DriveLetter`:\$FixItScriptName" -Value "c:\windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Unrestricted -EncodedCommand $EncodedCommand" -Force
-				# $Temp = Set-ItemProperty -Path $RunOncePath -Type ([Microsoft.Win32.RegistryValueKind]::String) -Name "!*BootScript" -Value "c:\$FixItScriptName"
-
-				# * will make the script run even in safe mode
-				# ! will make sure the script runs successfully before it is deleted
-				# This will run as FILE
-				Set-Content -Path "$DriveLetter`:\$FixItScriptName" -Value $RunOnceScript -Force
-				$Temp = Set-ItemProperty -Path $RunOncePath -Type ([Microsoft.Win32.RegistryValueKind]::String) -Name "!*BootScript" -Value "c:\windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Unrestricted -File `"c:\$FixItScriptName`"" -ErrorAction Stop
-				$Content = Get-ItemProperty -Path $RunOncePath -Name "!*BootScript" | Select-Object -ExpandProperty "!*BootScript"
-
-				Write-Verbose -Message "The value of $RunOncePath property `"!*BootScript`": $Content"
+				$Temp = Set-ItemProperty -Path $WinLogonPath -Name $Item.Key -Value $Item.Value -Type ([Microsoft.Win32.RegistryValueKind]::String) -Force
 			}
+
+			Write-Verbose -Message "Completed setting up auto logon."
+
+			Write-Verbose -Message "The run once script to be executed:`r`n$RunOnceScript"
+
+			# This is for running as a BAT
+			# Set-Content -Path "$DriveLetter`:\$FixItScriptName" -Value "c:\windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Unrestricted -EncodedCommand $EncodedCommand" -Force
+			# $Temp = Set-ItemProperty -Path $RunOncePath -Type ([Microsoft.Win32.RegistryValueKind]::String) -Name "!*BootScript" -Value "c:\$FixItScriptName"
+
+			# * will make the script run even in safe mode
+			# ! will make sure the script runs successfully before it is deleted
+			# This will run as FILE
+			Set-Content -Path "$DriveLetter`:\$FixItScriptName" -Value $RunOnceScript -Force
+			$Temp = Set-ItemProperty -Path $RunOncePath -Type ([Microsoft.Win32.RegistryValueKind]::String) -Name "!*BootScript" -Value "c:\windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Unrestricted -File `"c:\$FixItScriptName`"" -ErrorAction Stop
+			$Content = Get-ItemProperty -Path $RunOncePath -Name "!*BootScript" | Select-Object -ExpandProperty "!*BootScript"
+
+			Write-Verbose -Message "The value of $RunOncePath property `"!*BootScript`": $Content"
 		}
 		finally 
 		{
@@ -2906,19 +2987,11 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 		.PARAMETER InstanceName
 			The instance name of the EC2 instance to fix. The name tag value must be unique to use this parameter.
 
-		.PARAMETER UserName
-			The user name to use for the auto logon. This can be specified as domain\user, user@domain.com (UPN format), or just the username. If only a username
+		.PARAMETER DestinationCredential
+			The credentials to use for the auto logon. The user name can be specified as domain\user, user@domain.com (UPN format), or just the username. If only a username
 			is specified, provide the domain parameter, otherwise it will default to the offline machine computer name as specified in the computer's registry.
 
 			If the user is a domain user, a cached logon must be present to use it, as this cmdlet assumes the offline instance has no network connectivity.
-
-			The user must have local admin rights on the offline machine.
-
-		.PARAMETER Password
-			The password to be used for the auto logon corresponding to the provided user name.
-
-		.PARAMETER DestinationCredential
-			The credentials to use for the auto logon. See the UserName parameter for specifics on the username and domain requirements for the Credential UserName property.
 
 			The user must have local admin rights on the offline machine.
 
@@ -2949,6 +3022,11 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 
 			Each of these folders should contain 3 files, ena.cat, ena.inf, ena.sys. These files and folder structure are included with the module.
 
+		.PARAMETER AWSPVDriverPath
+			The path to the AWS PV drivers setup file, usually AWSPVDriver.msi or Citrix_xensetup.exe. 
+
+			This is optional. Use the AWSPVDriver.msi for Server 2008 R2 and above and Citrix_xensetup.exe for Server 2008 and below. 
+
 		.PARAMETER Timeout
 			The timeout in seconds to use when waiting for AWS operations to complete like stopping an instance, dismounting an EBS volume, etc. This defaults to 600.
 
@@ -2957,6 +3035,9 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 
 		.PARAMETER FixBCD
 			Ensures the BCD is up to date with the correct device settings and runs a chkdsk on all volumes.
+
+		.PARAMETER Force
+			Enables unattended mode to automatically select the disk and partitions if multiple new disks are found or if the disk has multiple partitions. The first of each is selected automatically.
 
 		.PARAMETER Region
 			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
@@ -2993,31 +3074,18 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 6/12/2017			
+			LAST UPDATE: 7/13/2017			
 	#>
 	[CmdletBinding()]
 	Param(
-		[Parameter(Mandatory = $true, ParameterSetName = "IdAndUsername")]
-		[Parameter(Mandatory = $true, ParameterSetName = "IdAndCredential")]
+		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
 		[System.String]$InstanceId,
 
-		[Parameter(Mandatory = $true, ParameterSetName = "NameAndUsername")]
-		[Parameter(Mandatory = $true, ParameterSetName = "NameAndCredential")]
+		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
 		[Alias("Name")]
 		[System.String]$InstanceName,
 
-		[Parameter(ParameterSetName = "IdAndUsername")]
-		[Parameter(ParameterSetName = "NameAndUsername")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$UserName,
-
-		[Parameter(ParameterSetName = "IdAndUsername")]
-		[Parameter(ParameterSetName = "NameAndUsername")]
-		[ValidateNotNull()]
-		[System.Security.SecureString]$Password,
-
-		[Parameter(ParameterSetName = "IdAndCredential")]
-		[Parameter(ParameterSetName = "NameAndCredential")]
+		[Parameter(Mandatory = $true)]
 		[ValidateNotNull()]
 		[System.Management.Automation.Credential()]
 		[System.Management.Automation.PSCredential]$DestinationCredential = [System.Management.Automation.PSCredential]::Empty,
@@ -3041,6 +3109,13 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 		[System.String]$ENADriversPath = "$env:SystemDrive\ENA",
 
 		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[ValidateScript({
+			Test-Path -Path $_
+		})]
+		[System.String]$AWSPVDriverPath,
+
+		[Parameter()]
 		[System.UInt32]$Timeout = 600,
 
 		[Parameter()]
@@ -3048,6 +3123,9 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 
 		[Parameter()]
 		[Switch]$FixBCD,
+
+		[Parameter()]
+		[Switch]$Force,
 
 		[Parameter()]
 		[ValidateNotNull()]
@@ -3104,7 +3182,7 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 
 		Write-Verbose -Message "Getting target EC2 instance."
 
-		if ($PSCmdlet.ParameterSetName.StartsWith("Id"))
+		if ($PSCmdlet.ParameterSetName -eq "Id")
 		{
 			$EC2 = Get-EC2InstanceByNameOrId -InstanceId $InstanceId @AwsUtilitiesSplat
 		}
@@ -3115,214 +3193,298 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 
 		if ($EC2 -ne $null)
 		{
+			Write-Verbose -Message "Identified EC2 instance $($EC2.InstanceId)"
+
 			Set-EC2InstanceState -InstanceId $EC2.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
 
 			[System.String]$RootVolume = $EC2.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $EC2.RootDeviceName} | Select-Object -ExpandProperty Ebs | Select-Object -First 1 -ExpandProperty VolumeId
 
-			Write-Verbose -Message "Getting info about volume $RootVolume."
-
-			[Amazon.EC2.Model.Volume]$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat -ErrorAction Stop
-
-			if (-not $DontTakeBackupSnapshot)
+			if (-not [System.String]::IsNullOrEmpty($RootVolume))
 			{
-				Write-Verbose -Message "Taking a backup EBS snapshot of the root volume."
-				[Amazon.EC2.Model.Snapshot]$Backup = New-EC2Snapshot -VolumeId $EBS.VolumeId -Description "BACKUP for $($EC2.InstanceId)" @Splat
+				Write-Verbose -Message "Getting info about volume $RootVolume."
+
+				[Amazon.EC2.Model.Volume]$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat -ErrorAction Stop
+
+				if (-not $DontTakeBackupSnapshot)
+				{
+					Write-Verbose -Message "Taking a backup EBS snapshot of the root volume."
+					[Amazon.EC2.Model.Snapshot]$Backup = New-EC2Snapshot -VolumeId $EBS.VolumeId -Description "BACKUP for $($EC2.InstanceId)" @Splat
+
+					$Counter = 0
+
+					while ($Backup.State -ne [Amazon.EC2.SnapshotState]::Completed -and $Counter -lt $Timeout)
+					{
+						[System.String]$Percent = "0"
+
+						if ($Backup.Progress -ne $null)
+						{
+							$Percent = $Backup.Progress.Replace("%", "")
+						}
+
+						Write-Progress -Activity "Creating backup snapshot" -Status "$Percent% Complete:" -PercentComplete $Percent
+
+						Write-Verbose -Message "Waiting on snapshot $($Backup.SnapshotId) to complete, currently at $Percent% in state $($Backup.State)"
+						$Backup = Get-EC2Snapshot -SnapshotId $Backup.SnapshotId @Splat
+
+						Start-Sleep -Seconds 1
+						$Counter++
+					}
+
+					Write-Progress -Completed -Activity "Creating backup snapshot"
+
+					if ($Counter -ge $Timeout)
+					{
+						throw "Timeout waiting for the backup EBS snapshot to complete."
+					}
+
+					Write-Host -Object "Backup snapshot id $($Backup.SnapshotId)."
+				}
+
+				Write-Verbose -Message "Dismounting volumes"
+				$Dismount = Dismount-EC2Volume -VolumeId $RootVolume -InstanceId $EC2.InstanceId @Splat -ErrorAction Stop
 
 				$Counter = 0
 
-				while ($Backup.State -ne [Amazon.EC2.SnapshotState]::Completed -and $Counter -lt $Timeout)
+				while ($EBS.State -ne [Amazon.EC2.VolumeState]::Available -and $Counter -le $Timeout)
 				{
-					[System.String]$Percent = "0"
+					Write-Verbose -Message "Waiting for EBS volume to become available."
+					Start-Sleep -Seconds 5
+					$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat
+					$Counter += 5
+				}
 
-					if ($Backup.Progress -ne $null)
+				if ($Counter -gt $Timeout)
+				{
+					throw "[ERROR] Timeout waiting for EBS volume $RootVolume to become available."
+				}
+
+				Write-Verbose -Message "EBS Volume $RootVolume is now available."
+
+				[System.String]$DestinationInstanceId = Get-EC2InstanceId
+				[Amazon.EC2.Model.Instance]$Destination = Get-EC2InstanceByNameOrId -InstanceId $DestinationInstanceId @AwsUtilitiesSplat
+
+				$OriginalDiskSerialNumbers = Get-Disk | Select-Object -ExpandProperty "SerialNumber"
+
+				Write-Verbose -Message "Mounting volume $RootVolume to $($Destination.InstanceId)."
+				Mount-EBSVolumes -VolumeIds $RootVolume -Instance $Destination -NextAvailableDevice @AwsUtilitiesSplat
+
+				Write-Verbose -Message "Sleeping to give the OS time to recognize the newly mounted disk."
+				Start-Sleep -Seconds 5
+
+				Write-Verbose -Message "Onlining disks and clearing readonly."
+
+				[Microsoft.Management.Infrastructure.CimInstance[]]$NewDisks = Get-Disk | Where-Object {$OriginalDiskSerialNumbers -notcontains $_.SerialNumber}
+
+				$NewDisks | Set-Disk -IsOffline $false
+				$NewDisks | Set-Disk -IsReadOnly $false
+
+				[System.Char]$OSPartition = $null
+				[System.Char]$BootPartition = $null
+
+				[System.UInt32]$DiskIndex = 0
+
+				if ($NewDisks.Length -eq 1 -or ($NewDisks.Length -gt 1 -and $Force))
+				{
+					$DiskIndex = $NewDisks[0].Number
+				}
+				elseif ($NewDisks.Count -gt 1)
+				{
+					while ($DiskIndex -lt 1)
 					{
-						$Percent = $Backup.Progress.Replace("%", "")
+						$DiskIndex = Read-Host -Prompt "Enter the disk index for the EBS volume that you want to modify, multiple new disks were identified"
 					}
-
-					Write-Progress -Activity "Creating backup snapshot" -Status "$Percent% Complete:" -PercentComplete $Percent
-
-					Write-Verbose -Message "Waiting on snapshot $($Backup.SnapshotId) to complete, currently at $Percent% in state $($Backup.State)"
-					$Backup = Get-EC2Snapshot -SnapshotId $Backup.SnapshotId @Splat
-
-					Start-Sleep -Seconds 1
-					$Counter++
-				}
-
-				Write-Progress -Completed -Activity "Creating backup snapshot"
-
-				if ($Counter -ge $Timeout)
-				{
-					throw "Timeout waiting for the backup EBS snapshot to complete."
-				}
-
-				Write-Host -Object "Backup snapshot id $($Backup.SnapshotId)."
-			}
-
-			Write-Verbose -Message "Dismounting volumes"
-			$Dismount = Dismount-EC2Volume -VolumeId $RootVolume -InstanceId $EC2.InstanceId @Splat -ErrorAction Stop
-
-			$Counter = 0
-
-			while ($EBS.State -ne [Amazon.EC2.VolumeState]::Available -and $Counter -le $Timeout)
-			{
-				Write-Verbose -Message "Waiting for EBS volume to become available."
-				Start-Sleep -Seconds 5
-				$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat
-				$Counter += 5
-			}
-
-			if ($Counter -gt $Timeout)
-			{
-				throw "[ERROR] Timeout waiting for EBS volume $RootVolume to become available."
-			}
-
-			Write-Verbose -Message "EBS Volume $RootVolume is now available."
-
-			[System.String]$DestinationInstanceId = Get-EC2InstanceId
-			[Amazon.EC2.Model.Instance]$Destination = Get-EC2InstanceByNameOrId -InstanceId $DestinationInstanceId @AwsUtilitiesSplat
-
-			$OriginalDiskSerialNumbers = Get-Disk | Select-Object -ExpandProperty "SerialNumber"
-
-			Write-Verbose -Message "Mounting volume $RootVolume to $($Destination.InstanceId)."
-			Mount-EBSVolumes -VolumeIds $RootVolume -Instance $Destination -NextAvailableDevice @AwsUtilitiesSplat
-
-			Write-Verbose -Message "Sleeping to give the OS time to recognize the newly mounted disk."
-			Start-Sleep -Seconds 15
-
-			Write-Verbose -Message "Onlining disks and clearing readonly."
-
-			$NewDisks = Get-Disk | Where-Object {$OriginalDiskSerialNumbers -notcontains $_.SerialNumber}
-			$NewDisks | Set-Disk -IsOffline $false
-			$NewDisks | Set-Disk -IsReadOnly $false
-
-			$DriveLetter = Read-Host -Prompt "Enter new drive letter that was mounted."
-
-			[System.Collections.Hashtable]$ScriptSplat = @{}
-
-			if ($PSCmdlet.ParameterSetName.EndsWith("Credential"))
-			{
-				$ScriptSplat.Credential = $DestinationCredential
-			}
-			else
-			{
-				$ScriptSplat.UserName = $UserName
-				$ScriptSplat.Password = $Password
-			}
-
-			if (-not [System.String]::IsNullOrEmpty($Domain))
-			{
-				$ScriptSplat.Domain = $Domain
-			}
-
-			$IntelNetworkingTypes = @("c3", "c4", "d2", "i2", "r3", "m4")
-			$ENANetworkingTypes = @("f1", "i3", "p2", "r4", "x1")
-
-			Write-Verbose -Message "Instance type is $($EC2.InstanceType.Value)."
-
-			$TypePrefix = $EC2.InstanceType.Value.Substring(0, 2)
-
-			$DriversPath = [System.String]::Empty
-
-			if ($TypePrefix -iin $IntelNetworkingTypes -and $EC2.InstanceType.Value -ine "m4.16xlarge")
-			{
-				Write-Verbose -Message "Using Intel enhanced networking drivers."
-				$ScriptSplat.EnhancedNetworkingType = $script:INTEL_DRIVER
-				$ScriptSplat.EnhancedNetworkingDriverPath = $IntelDriversPath
-			}
-			elseif ($TypePrefix -iin $ENANetworkingTypes -or $EC2.InstanceType.Value -ieq "m4.16xlarge")
-			{
-				Write-Verbose -Message "Use ENA enhanced networking drivers."
-				$ScriptSplat.EnhancedNetworkingType = $script:ENA
-				$ScriptSplat.EnhancedNetworkingDriverPath = $ENADriversPath
-			}
-			else
-			{
-				# Make sure to establish the key so we can test it later to see if we enable ENA or not
-				$ScriptSplat.EnhancedNetworkingType = [System.String]::Empty
-				$ScriptSplat.EnhancedNetworkingDriverPath = [System.String]::Empty
-				Write-Warning -Message "The instance type $($EC2.InstanceType.Value) does not support enhanced networking."
-			}
-
-			Write-Verbose -Message "Running Invoke-AWSNetworkAdapterFixOnOfflineDisk."
-			
-			try
-			{
-				Invoke-AWSNetworkAdapterFixOnOfflineDisk -DriveLetter ([System.Char]$DriveLetter) @ScriptSplat
-			}
-			catch [Exception]
-			{
-				Write-Warning -Message "Could not modify the offline disk: $($_.Exception.Message)."
-			}
-
-			if ($FixBCD)
-			{
-				Write-Verbose -Message "Running a chkdsk on the mounted drive."
-				& chkdsk.exe "$DriveLetter`:" /F
-
-				Write-Verbose -Message "Running a chkdsk on recovery partition."
-				& chkdsk.exe "$([System.Char](([System.Int32]$DriveLetter) - 1)):" /F
-
-				Write-Verbose -Message "Checking BCD."
-				$BCDPath = "$([System.Char](([System.Int32]$DriveLetter) - 1)):\Boot\BCD"
-				& bcdedit.exe /store "$BCDPath"
-
-				Write-Verbose -Message "Fixing up BCD."
-
-				& bcdedit.exe /store "$BCDPath" /set "{bootmgr}" device boot
-				& bcdedit.exe /store "$BCDPath" /set "{default}" device partition=c:
-				& bcdedit.exe /store "$BCDPath" /set "{default}" osdevice partition=c:
-				& bcdedit.exe /store "$BCDPath"
-			}
-
-			Write-Verbose -Message "Offlining disks."
-			$NewDisks | Set-Disk -IsOffline $true
-
-			Write-Verbose -Message "Removing mounted volume."
-			$Dismount = Dismount-EC2Volume -InstanceId $Destination.InstanceId -VolumeId $RootVolume @Splat
-
-			$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat
-
-			$Counter = 0
-
-			while ($EBS.State -ne [Amazon.EC2.VolumeState]::Available -and $Counter -le $Timeout)
-			{
-				Write-Verbose -Message "Waiting for EBS volume to become available."
-				Start-Sleep -Seconds 5
-				$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat
-				$Counter += 5
-			}
-
-			if ($Counter -gt $Timeout)
-			{
-				throw "[ERROR] Timeout waiting for EBS volume $RootVolume to become available."
-			}
-
-			Write-Verbose -Message "Attaching volume back to original instance."
-			[Amazon.EC2.Model.VolumeAttachment]$Attachment = Add-EC2Volume -Device "/dev/sda1" -InstanceId $EC2.InstanceId -VolumeId $RootVolume @Splat
-
-			if ($ScriptSplat.ContainsKey("EnhancedNetworkingType") -and (-not [System.String]::IsNullOrEmpty($ScriptSplat.EnhancedNetworkingType)))
-			{
-				if ($ScriptSplat.EnhancedNetworkingType -eq $script:INTEL_DRIVER)
-				{
-					Write-Verbose -Message "Enabling srIov support on $($EC2.InstanceId)."
-					Edit-EC2InstanceAttribute -InstanceId $EC2.InstanceId -SriovNetSupport "simple" 
-				}
-				elseif ($ScriptSplat.EnhancedNetworkingType -eq $script:ENA)
-				{
-					Write-Verbose -Message "Enabling ENA support on $($EC2.InstanceId)."
-					Edit-EC2InstanceAttribute -InstanceId $EC2.InstanceId -EnaSupport $true
 				}
 				else
 				{
-					Write-Warning -Message "The enhanced networking type specified was not recognized: $($ScriptSplat.EnhancedNetworkingType)."
+					throw "No new disks were identified, ensure the attached EBS volumes are attached to the EC2 instance."
 				}
+
+				[Microsoft.Management.Infrastructure.CimInstance[]]$Partitions = Get-CimInstance -ClassName Win32_DiskPartition -Filter ("DiskIndex = $DiskIndex") 
+
+				if ($Partitions.Count -gt 1)
+				{
+					[Microsoft.Management.Infrastructure.CimInstance[]]$BootablePartitions = $Partitions | Where-Object { $_.BootPartition -eq $true } 
+					[Microsoft.Management.Infrastructure.CimInstance[]]$NonBootablePartitions = $Partitions | Where-Object { $_.BootPartition -eq $false } 
+
+					if ($BootablePartitions -ne $null -and $BootablePartitions.Count -ge 1)
+					{
+						if ($BootablePartitions.Count -eq 1 -or $Force)
+						{
+							# The CIM instance index is 0 based, the partition numbering is 1 based
+							$BootPartition = Get-Partition -DiskNumber $BootablePartitions[0].DiskIndex -PartitionNumber ($BootablePartitions[0].Index + 1) | Select-Object -ExpandProperty DriveLetter
+						}
+						else
+						{
+							do {
+								$BootPartition = Read-Host -Prompt "Multiple boot volumes discovered, enter the drive letter where the BCD is located (typically System Reserved partition) for the disk you want to fix"
+							} while ($BootPartition -eq $null -or [System.Char]::ToLower($BootPartition) -lt 'd' -or [System.Char]::ToLower($BootPartition) -gt 'z')
+						}
+					
+						if ($NonBootablePartitions.Count -eq 1)
+						{
+							$OSPartition = Get-Partition -DiskNumber $NonBootablePartitions[0].DiskIndex -PartitionNumber ($NonBootablePartitions[0].Index + 1) | Select-Object -ExpandProperty DriveLetter
+						}
+						elseif ($NonBootablePartitions.Count -eq 0)
+						{
+							if ($BootPartition -ne $null)
+							{
+								# There were multiple bootable partitions, and no non-bootable, use the selected bootable
+								$OSPartition = $BootPartition
+							}
+						}
+						else
+						{
+							# There are multiple non-bootable partitions, prompt the user for which to select
+							do {
+								$OSPartition = Read-Host -Prompt "Multiple data volumes discovered, enter the drive letter of the operating system volume"
+							} while ($OSPartition -eq $null -or [System.Char]::ToLower($OSPartition) -lt 'd' -or [System.Char]::ToLower($OSPartition) -gt 'z')
+						}
+					}
+					else
+					{
+						throw "No bootable volumes found from attached EBS volume, this wasn't a root device."
+					}
+				}
+				else
+				{
+					$BootPartition = Get-Partition -DiskNumber $Partitions[0].DiskIndex -PartitionNumber ($Partitions[0].Index + 1) | Select-Object -ExpandProperty DriveLetter
+					$OSPartition = $BootPartition
+				}
+
+				Write-Verbose -Message "The boot drive is $BootPartition`:\ and the OS drive is $OSPartition`:\."
+			
+				[System.Collections.Hashtable]$ScriptSplat = @{}
+
+				$ScriptSplat.Credential = $DestinationCredential
+
+				if (-not [System.String]::IsNullOrEmpty($Domain))
+				{
+					$ScriptSplat.Domain = $Domain
+				}
+
+				$IntelNetworkingTypes = @("c3", "c4", "d2", "i2", "r3", "m4")
+				$ENANetworkingTypes = @("f1", "i3", "p2", "r4", "x1")
+
+				Write-Verbose -Message "Instance type is $($EC2.InstanceType.Value)."
+
+				$TypePrefix = $EC2.InstanceType.Value.Substring(0, 2)
+
+				$DriversPath = [System.String]::Empty
+
+				if ($TypePrefix -iin $IntelNetworkingTypes -and $EC2.InstanceType.Value -ine "m4.16xlarge")
+				{
+					Write-Verbose -Message "Using Intel enhanced networking drivers."
+					$ScriptSplat.EnhancedNetworkingType = $script:INTEL_DRIVER
+					$ScriptSplat.EnhancedNetworkingDriverPath = $IntelDriversPath
+				}
+				elseif ($TypePrefix -iin $ENANetworkingTypes -or $EC2.InstanceType.Value -ieq "m4.16xlarge")
+				{
+					Write-Verbose -Message "Use ENA enhanced networking drivers."
+					$ScriptSplat.EnhancedNetworkingType = $script:ENA
+					$ScriptSplat.EnhancedNetworkingDriverPath = $ENADriversPath
+				}
+				else
+				{
+					Write-Warning -Message "The instance type $($EC2.InstanceType.Value) does not support enhanced networking."
+				}
+
+				if (-not [System.String]::IsNullOrEmpty($AWSPVDriverPath))
+				{
+					$ScriptSplat.AWSPVDriverPath = $AWSPVDriverPath
+				}
+
+				Write-Verbose -Message "Running Invoke-AWSNetworkAdapterFixOnOfflineDisk."
+			
+				[System.Decimal]$OSVersion = 0
+
+				try
+				{
+					Invoke-AWSNetworkAdapterFixOnOfflineDisk -DriveLetter ($OSPartition) -OperatingSystem ([ref]$OSVersion) @ScriptSplat
+				}
+				catch [Exception]
+				{
+					Write-Warning -Message "Could not modify the offline disk: $($_.Exception.Message)."
+				}
+
+				if ($FixBCD)
+				{
+					Write-Verbose -Message "Running a chkdsk on the mounted drive."
+					& chkdsk.exe "$OSPartition`:" /F
+
+					Write-Verbose -Message "Running a chkdsk on recovery partition."
+					& chkdsk.exe "$BootPartition`:" /F
+
+					Write-Verbose -Message "Checking BCD."
+					$BCDPath = "$BootPartition`:\Boot\BCD"
+					& bcdedit.exe /store "$BCDPath"
+
+					Write-Verbose -Message "Fixing up BCD."
+
+					& bcdedit.exe /store "$BCDPath" /set "{bootmgr}" device boot
+					& bcdedit.exe /store "$BCDPath" /set "{default}" device partition=c:
+					& bcdedit.exe /store "$BCDPath" /set "{default}" osdevice partition=c:
+					& bcdedit.exe /store "$BCDPath"
+				}
+
+				Write-Verbose -Message "Offlining disks."
+				$NewDisks | Set-Disk -IsOffline $true
+
+				Write-Verbose -Message "Removing mounted volume."
+				$Dismount = Dismount-EC2Volume -InstanceId $Destination.InstanceId -VolumeId $RootVolume @Splat
+
+				$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat
+
+				$Counter = 0
+
+				while ($EBS.State -ne [Amazon.EC2.VolumeState]::Available -and $Counter -le $Timeout)
+				{
+					Write-Verbose -Message "Waiting for EBS volume to become available."
+					Start-Sleep -Seconds 5
+					$EBS = Get-EC2Volume -VolumeId $RootVolume @Splat
+					$Counter += 5
+				}
+
+				if ($Counter -gt $Timeout)
+				{
+					throw "[ERROR] Timeout waiting for EBS volume $RootVolume to become available."
+				}
+
+				Write-Verbose -Message "Attaching volume back to original instance."
+				[Amazon.EC2.Model.VolumeAttachment]$Attachment = Add-EC2Volume -Device "/dev/sda1" -InstanceId $EC2.InstanceId -VolumeId $RootVolume @Splat
+
+				# Enable enhanced networking if the script splat had the parameters set because the EC2 instance type matched
+				# a compatible type and the operating system version supports enhanced networking, which is Server 2008 R2 and above (6.1)
+				if ($OSVersion -ge 6.1 -and
+					$ScriptSplat.ContainsKey("EnhancedNetworkingType") -and 
+					(-not [System.String]::IsNullOrEmpty($ScriptSplat.EnhancedNetworkingType))
+				)
+				{
+					if ($ScriptSplat.EnhancedNetworkingType -eq $script:INTEL_DRIVER)
+					{
+						Write-Verbose -Message "Enabling srIov support on $($EC2.InstanceId)."
+						Edit-EC2InstanceAttribute -InstanceId $EC2.InstanceId -SriovNetSupport "simple" 
+					}
+					elseif ($ScriptSplat.EnhancedNetworkingType -eq $script:ENA)
+					{
+						Write-Verbose -Message "Enabling ENA support on $($EC2.InstanceId)."
+						Edit-EC2InstanceAttribute -InstanceId $EC2.InstanceId -EnaSupport $true
+					}
+					else
+					{
+						Write-Warning -Message "The enhanced networking type specified was not recognized: $($ScriptSplat.EnhancedNetworkingType)."
+					}
+				}
+				else
+				{
+					Write-Verbose -Message "Skipping modifying instance attributes to support enhanced networking."
+				}
+
+				$Result = Set-EC2InstanceState -InstanceId $EC2.InstanceId -State START @AwsUtilitiesSplat
 			}
 			else
 			{
-				Write-Verbose -Message "Skipping modifying instance attributes to support enhanced networking."
+				Write-Warning -Message "EC2 Instance $($EC2.InstanceId) has no root volume attached."
 			}
-
-			$Result = Set-EC2InstanceState -InstanceId $EC2.InstanceId -State START @AwsUtilitiesSplat
 		}
 		else
 		{
