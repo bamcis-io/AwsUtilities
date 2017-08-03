@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.2.0
+Added the Get-AWSPublicIPRanges cmdlet.
+
 ### 1.0.1.1
 Updated the Invoke-AWSNetworkAdapterFixOnOfflineDisk and Invoke-AWSNetworkAdapterFixOnRemoteInstance cmdlets.
 

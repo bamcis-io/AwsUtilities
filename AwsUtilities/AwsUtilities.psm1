@@ -6,6 +6,8 @@ $script:CAN_BE_DELETED = "CanBeDeleted"
 [System.Guid]$script:UNIQUE_ID = [System.Guid]::Parse("17701dbb-33ff-4f31-8914-6f48856fe755")
 $script:INTEL_DRIVER = "Intel82599VF"
 $script:ENA = "ENA"
+$script:FederationUrl = "https://signin.aws.amazon.com/federation"
+$script:IPRangeUrl = "https://ip-ranges.amazonaws.com/ip-ranges.json"
 
 #Make the variable $AWSRegions available to all of the cmdlets
 Set-Variable -Name AWSRegions -Value (@((Get-AWSRegion -GovCloudOnly | Select-Object -ExpandProperty Region), (Get-AWSRegion -IncludeChina | Select-Object -ExpandProperty Region)) | Select-Object -Unique)
@@ -4833,7 +4835,7 @@ Function Get-AWSFederationLogonUrl {
 			None
 
 		.OUTPUTS
-			System.Sting
+			System.String
 
 		.NOTES
 			AUTHOR: Michael Haken
@@ -4882,7 +4884,6 @@ Function Get-AWSFederationLogonUrl {
 	)
 
 	Begin {
-		$Base = "https://signin.aws.amazon.com/federation"
 		$Destination = [System.Net.WebUtility]::UrlEncode("https://console.aws.amazon.com")
 	}
 
@@ -4900,7 +4901,7 @@ Function Get-AWSFederationLogonUrl {
 		[Amazon.SecurityToken.Model.AssumeRoleResponse]$Role = Use-STSRole -DurationInSeconds $Duration -RoleSessionName $SessionName -RoleArn $RoleArn @Splat
 
 		# Form the url to to get the signin token
-		$Url = "$Base`?Action=getSigninToken&SessionType=json&Session={`"sessionId`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.AccessKeyId))`",`"sessionKey`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SecretAccessKey))`",`"sessionToken`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SessionToken))`"}"
+		$Url = "$script:FederationUrl`?Action=getSigninToken&SessionType=json&Session={`"sessionId`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.AccessKeyId))`",`"sessionKey`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SecretAccessKey))`",`"sessionToken`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SessionToken))`"}"
 
 		<# Get the token, it's in the form of
 		{
@@ -4922,9 +4923,85 @@ Function Get-AWSFederationLogonUrl {
 		$Action = "login"
 
 		# Create the signin url, it's valid for 15 minutes regardless of the duration of the assumed role
-		$Signin = "$Base`?Action=$Action&Issuer=$Issuer&Destination=$Destination&SigninToken=$Token"
+		[System.String]$Signin = "$script:FederationUrl`?Action=$Action&Issuer=$Issuer&Destination=$Destination&SigninToken=$Token"
 
 		Write-Output -InputObject $Signin
+	}
+
+	End {
+	}
+}
+
+Function Get-AWSPublicIPRanges {
+	<#
+		.SYNOPSIS
+			Gets the public IP ranges AWS uses.
+
+		.DESCRIPTION
+			The cmdlet queries the ip-ranges.json file AWS provides and filters the results based on the selected services and/or regions. If no filter
+			values are provided, all of the results are returned. The results contain the IP prefix, the region, and the service.
+
+		.PARAMETER Services
+			The list of AWS services to filter the results on.
+
+		.PARAMETER Regions
+			The list of AWS regions to filter the results on.
+
+		.EXAMPLE
+			Get-AWSPublicIPRanges
+			
+			Gets all of the public IP prefixes AWS has.
+
+		.EXAMPLE
+			Get-AWSPublicIPRanges -Services @("EC2", "S3")
+
+			Gets the public IP ranges used by EC2 and S3.
+
+		.EXAMPLE
+			Get-AWSPublicIPRanges -Services EC2 -Regions @([Amazon.RegionEndpoint]::USEast1, [Amazon.RegionEndpoint]::USEast2)
+
+			Gets the public IP ranges used by EC2 in us-east-1 and us-east-2.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 8/3/2017
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter()]
+		[ValidateSet("AMAZON", "ROUTE53_HEALTHCHECKS", "S3", "EC2", "ROUTE53", "CLOUDFRONT")]
+		[System.String[]]$Services = @(),
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint[]]$Regions = @()
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Net.WebClient]$Client = New-Object -TypeName System.Net.WebClient
+		$Json = $Client.DownloadString($script:IPRangeUrl)
+		$Content = ConvertFrom-Json -InputObject $Json | Select-Object -ExpandProperty prefixes
+		
+		if ($Regions.Length -gt 0)
+		{
+			$Content = $Content | Where-Object {$_.region -in ($Regions | Select-Object -ExpandProperty SystemName) }
+		}
+
+		if ($Services.Length -gt 0)
+		{
+			$Content = $Content | Where-Object {$_.service -in $Services}
+		}
+
+		Write-Output -InputObject ($Content | Sort-Object -Property service,region)
 	}
 
 	End {
