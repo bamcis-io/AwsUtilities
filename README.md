@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.3.0
+Added the Get-AWSCloudTrailLogs cmdlet.
+
 ### 1.0.2.0
 Added the Get-AWSPublicIPRanges cmdlet.
 

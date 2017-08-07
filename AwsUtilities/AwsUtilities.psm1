@@ -5007,3 +5007,316 @@ Function Get-AWSPublicIPRanges {
 	End {
 	}
 }
+
+Function Get-AWSCloudTrailLogs {
+	<#
+		.SYNOPSIS
+			Gets CloudTrail log files from an S3 bucket.
+
+		.DESCRIPTION
+			The cmdlet retrieves CloudTrail log data from S3 for the specified region. It expects the S3 keys for the files to be in the AWS created syntax:
+
+			AWSLogs/AccountId/CloudTrail/Region/Year/Month/Day/filename.json.gz
+
+			The contents of the log files are returned uncompressed. Additionally, the returned records can be filtered by eventName, aka API action, like DescribeInstances.
+
+		.PARAMETER Bucket
+			The name of the bucket containing the log files.
+
+		.PARAMETER AccountId
+			Specify the account Id in the S3 object key, this may not be the same as the account in which the S3 bucket exists if cross account CloudTrail log delivery is enabled.
+
+			This parameter defaults to the account associated with the credentials of the calling user.
+
+		.PARAMETER Start
+			Specifies the date to retrieve log files after (inclusive). The date is represented in UTC time.
+
+		.PARAMETER End
+			Specifies the date to retrieve log files before (inclusive). The date is represented in UTC time.
+
+		.PARAMETER APIs
+			Specifies the eventName attribute of the CloudTrail log object to match against when retrieving log records. If this is not specified, all records are returned.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked and the region for which to get CloudTrail log records from S3. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$End = [System.DateTime]::Parse("7/1/2017 11:59:59 PM")
+
+			$Results = Get-AWSCloudTrailLogs -Bucket "myaccount-logging" -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End -APIs @("DescribeInstances", "DescribeVolumes")
+			ConvertTo-Json -InputObject $Results
+
+			This gets the CloudTrail log files from 7/1/2017 in us-east-1, the default region, for DescribeInstances and DescribeVolumes API calls. The results are then serialized into JSON.
+
+		.EXAMPLE
+			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
+
+			$Results = Get-AWSCloudTrailLogs -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast2) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
+
+			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-2 region and includes all API calls.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 8/7/2017
+	#>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject[]])]
+    Param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [System.String]$Bucket,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [ValidateScript({$_.Length -eq 12})]
+        [System.String]$AccountId = [System.String]::Empty,
+
+        [Parameter()]
+        [System.DateTime]$Start = [System.DateTime]::MinValue,
+
+        [Parameter()]
+        [ValidateScript({
+            $_ -ge $Start
+        })]
+        [System.DateTime]$End = [System.DateTime]::MaxValue,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String[]]$APIs = @(),
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+    )
+
+    Begin {       
+    }
+
+    Process {
+        Initialize-AWSDefaults
+
+        if ($Region -eq $null) {
+            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
+        }
+
+        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+        [Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @Splat
+
+        if ([System.String]::IsNullOrEmpty($AccountId))
+        {
+            $AccountId = $Identity.Account
+        }
+
+        $Temp = $Splat
+        $Temp.Remove("Region")
+
+        Set-AWSCredentials @Temp
+
+        if ($Credential -eq $null)
+        {
+            $Credential = Get-AWSCredentials
+        }
+
+        [Amazon.S3.IAmazonS3]$S3Client = New-Object -TypeName Amazon.S3.AmazonS3Client($Credential)
+
+        [Amazon.S3.Model.S3Bucket]$S3Bucket = Get-S3Bucket -BucketName $Bucket @Splat
+
+        if ($S3Bucket -ne $null)
+        {
+            $Prefix = "AWSLogs/$AccountId/CloudTrail/$($Region.SystemName)/"
+
+            [Amazon.S3.Model.ListObjectsV2Response]$Response = $null
+            [Amazon.S3.Model.ListObjectsV2Request]$Request = New-Object -TypeName Amazon.S3.Model.ListObjectsV2Request
+            $Request.BucketName = $Bucket
+            $Request.Prefix = $Prefix
+
+            # If a start is defined, find the first key on or after that day
+            if ($Start -gt [System.DateTime]::MinValue) 
+			{
+                [Amazon.S3.Model.S3Object]$FirstObject = $null
+
+                [System.DateTime]$TempStart = $Start
+
+                while ($FirstObject -eq $null) 
+				{
+                    if ($TempStart -gt $End -or $TempStart -gt [System.DateTime]::Now) {
+                        throw "No files could be found between the provided start and end times."
+                    }
+
+                    [System.String]$StartPrefix = "$Prefix$($TempStart.Year)/$($TempStart.Month.ToString("d2"))/$($TempStart.Day.ToString("d2"))/"
+                    
+					Write-Verbose -Message "Testing start prefix $StartPrefix"
+                    
+					$FirstObject = Get-S3Object -BucketName $Bucket -KeyPrefix $StartPrefix -MaxKey 1 @Splat
+                    $TempStart = $TempStart.AddDays(1)
+                }
+
+                Write-Verbose -Message "First key $($FirstObject.Key)"
+
+                # S3 will ignore this parameter after the first request if the ContinuationToken is set
+                $Request.StartAfter = $FirstObject.Key
+            }
+
+            [System.String[]]$Files = @()
+
+            do {
+                if (-not [System.String]::IsNullOrEmpty($Request.ContinuationToken)) 
+                {
+                    Write-Progress -Activity "Listing objects" -Status "Making continuation request with marker $($Request.ContinuationToken) for 1000 objects"
+                }
+
+                $Response = $S3Client.ListObjectsV2($Request)
+
+                foreach ($Object in $Response.S3Objects)
+                {
+					# Remove the known prefix from the key, and then split into the parts of the key path
+                    $Parts = $Object.Key.Remove(0, $Prefix.Length).Split("/")
+                    [System.DateTime]$Time = [System.DateTime]::Parse("$($Parts[1])/$($Parts[2])/$($Parts[0])")
+
+					# You probably don't need to check the start since either we're using the start marker
+					# or everything will be greater than DateTime.MinValue
+                    if ($Time -ge $Start) {
+                        if ($Time -le $End) {
+                            $Files += $Object.Key
+                            Write-Verbose -Message "Adding key $($Object.Key)"
+                        }
+                        else 
+                        {
+                            # Otherwise we've gotten into objects that are past the end time
+                            # Go ahead and end the do/while loop and break from this foreach loop
+                            $Response.IsTruncated = $false
+                            break
+                        }
+                    }
+                }
+
+                $Request.ContinuationToken = $Response.NextContinuationToken
+
+            } while ($Response.IsTruncated)
+
+            [Amazon.S3.Transfer.TransferUtility]$TransferUtility = New-Object -TypeName Amazon.S3.Transfer.TransferUtility($S3Client)
+            [Amazon.S3.Transfer.TransferUtilityOpenStreamRequest]$StreamRequest = New-Object -TypeName Amazon.S3.Transfer.TransferUtilityOpenStreamRequest
+            $StreamRequest.BucketName = $Bucket
+
+            [PSCustomObject[]]$Results = ForEach-ObjectParallel -WaitTime 500 -InputObject $Files -Verbose -Parameters @{"Bucket" = $Bucket; "S3Client" = $S3Client; "APIs" = $APIs } -ScriptBlock {
+                Param(
+                    [System.String]$File,
+                    [System.String]$Bucket,
+                    [Amazon.S3.IAmazonS3]$S3Client,
+                    [System.String[]]$APIs
+                )
+
+                try {
+                    [Amazon.S3.Transfer.TransferUtility]$TransferUtility = New-Object -TypeName Amazon.S3.Transfer.TransferUtility($S3Client)
+                    [Amazon.S3.Transfer.TransferUtilityOpenStreamRequest]$StreamRequest = New-Object -TypeName Amazon.S3.Transfer.TransferUtilityOpenStreamRequest
+                    $StreamRequest.BucketName = $Bucket
+
+                    $StreamRequest.Key = $File
+                    [System.IO.Stream]$Stream = $TransferUtility.OpenStream($StreamRequest)
+                    [System.IO.Compression.GZipStream]$GZipStream = New-Object -TypeName System.IO.Compression.GZipStream($Stream, [System.IO.Compression.CompressionMode]::Decompress)
+
+                    [System.IO.StreamReader]$Reader = New-Object -TypeName System.IO.StreamReader($GZipStream)
+
+                    $Content = $Reader.ReadToEnd()
+
+                    $Temp = ConvertFrom-Json -InputObject $Content
+
+                    [PSCustomObject[]]$Records = $null
+
+                    if ($APIs.Length -gt 0)
+                    {
+                        $Records = $Temp.Records | Where-Object {$_.eventName -iin $APIs}
+                    }
+                    else 
+                    {
+                        $Records = $Temp.Records
+                    }
+
+                    if ($Records -ne $null -and $Records.Length -gt 0) {                    
+                        Write-Output -InputObject $Records
+                    }
+                }
+                finally 
+                {
+                    if ($Reader -ne $null) 
+                    {
+                        $Reader.Dispose()
+                    }
+
+                    if ($GZipStream -ne $null) 
+                    {
+                        $GZipStream.Dispose()
+                    }
+
+                    if ($Stream -ne $null) 
+                    {
+                        $Stream.Dispose()       
+                    }     
+                }
+            }
+
+            Write-Output -InputObject $Results
+        }
+        else {
+            throw "The bucket $Bucket could not be found in account $($Identity.Account)."
+        }
+    }
+
+    End {
+    }
+}
