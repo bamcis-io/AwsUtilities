@@ -5037,6 +5037,13 @@ Function Get-AWSCloudTrailLogs {
 		.PARAMETER APIs
 			Specifies the eventName attribute of the CloudTrail log object to match against when retrieving log records. If this is not specified, all records are returned.
 
+		.PARAMETER Filter
+			You can specify a hash table of key values that correspond to properties of the CloudTrail log. You can specify sub-properties as the key like:
+
+			@{"userIdentity.arn" : "arn:aws:iam::*:instance-profile/*" }
+
+			The value can contain wildcards to match against the CloudTrail log attributes.
+
 		.PARAMETER Region
 			The system name of the AWS region in which the operation should be invoked and the region for which to get CloudTrail log records from S3. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
 
@@ -5079,6 +5086,20 @@ Function Get-AWSCloudTrailLogs {
 
 			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-2 region and includes all API calls.
 
+		.EXAMPLE
+			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
+
+			$Results = Get-AWSCloudTrailLogs -Filter @{ "eventName" : "CreateTag" } -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast2) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
+
+			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-2 region and includes CreateTag API calls (this example is identitical to providing the parameter -APIs @("CreateTag") ).
+
+		.EXAMPLE
+			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
+
+			$Results = Get-AWSCloudTrailLogs -Filter @{"eventSource" = "opsworks.amazonaws.com"; "eventName" = "TagResource"} -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast1) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
+
+			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-1 region and includes TagResource events generated from OpsWorks.
+
 		.INPUTS
 			None
 
@@ -5110,9 +5131,12 @@ Function Get-AWSCloudTrailLogs {
         })]
         [System.DateTime]$End = [System.DateTime]::MaxValue,
 
-        [Parameter()]
+        [Parameter(ParameterSetName = "API")]
         [ValidateNotNull()]
         [System.String[]]$APIs = @(),
+
+		[Parameter(ParameterSetName = "Filter")]
+		[System.Collections.Hashtable]$Filter = @{},
 
         [Parameter()]
         [ValidateNotNull()]
@@ -5162,13 +5186,18 @@ Function Get-AWSCloudTrailLogs {
             $AccountId = $Identity.Account
         }
 
-        $Temp = $Splat
-        $Temp.Remove("Region")
+		# We can only set the credentials if 
+		if (($Splat.ContainsKey("AccessKey") -and $Splat.ContainsKey("SecretKey")) -or $Splat.ContainsKey("ProfileName"))
+		{
+			$Temp = $Splat
+			$Temp.Remove("Region")
 
-        Set-AWSCredentials @Temp
+			Set-AWSCredentials @Temp
+		}
 
         if ($Credential -eq $null)
         {
+			# This shouldn't return $null since we initialized defaults
             $Credential = Get-AWSCredentials
         }
 
@@ -5253,12 +5282,13 @@ Function Get-AWSCloudTrailLogs {
             [Amazon.S3.Transfer.TransferUtilityOpenStreamRequest]$StreamRequest = New-Object -TypeName Amazon.S3.Transfer.TransferUtilityOpenStreamRequest
             $StreamRequest.BucketName = $Bucket
 
-            [PSCustomObject[]]$Results = ForEach-ObjectParallel -WaitTime 500 -InputObject $Files -Verbose -Parameters @{"Bucket" = $Bucket; "S3Client" = $S3Client; "APIs" = $APIs } -ScriptBlock {
+            [PSCustomObject[]]$Results = ForEach-ObjectParallel -WaitTime 500 -InputObject $Files -Verbose -Parameters @{"Bucket" = $Bucket; "S3Client" = $S3Client; "APIs" = $APIs; "Filter" = $Filter } -ScriptBlock {
                 Param(
                     [System.String]$File,
                     [System.String]$Bucket,
                     [Amazon.S3.IAmazonS3]$S3Client,
-                    [System.String[]]$APIs
+                    [System.String[]]$APIs,
+					[System.Collections.Hashtable]$Filter
                 )
 
                 try {
@@ -5280,12 +5310,29 @@ Function Get-AWSCloudTrailLogs {
 
                     if ($APIs.Length -gt 0)
                     {
-                        $Records = $Temp.Records | Where-Object {$_.eventName -iin $APIs}
+                        $Temp.Records = $Temp.Records | Where-Object {$_.eventName -iin $APIs}
                     }
-                    else 
-                    {
-                        $Records = $Temp.Records
-                    }
+					
+					if ($Filter.Count -gt 0)
+					{
+						foreach ($Item in $Filter.GetEnumerator())
+						{
+							$Parts = $Item.Key.Split(".")
+
+							$Temp.Records = $Temp.Records | Where-Object {
+								$TempVal = $_
+								
+								# This will expand the sub properties if the key is "dotted" like user.id
+								foreach ($Part in $Parts) {
+									$TempVal = $TempVal | Select-Object -ExpandProperty $Part
+								}
+        
+								$TempVal -ilike $Item.Value
+							}    
+						}
+					}
+                    
+					$Records = $Temp.Records
 
                     if ($Records -ne $null -and $Records.Length -gt 0) {                    
                         Write-Output -InputObject $Records
