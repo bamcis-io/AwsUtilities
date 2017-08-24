@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.3.2
+Fixed typos in examples.
+
 ### 1.0.3.1
 Updated the manifest file to include the HostUtilities module. Fixed setting AWS credentials in Get-AWSCloudTrailLogs if no credential information provided. Added a Filter parameter to the Get-AWSCloudTrailLogs cmdlet.
 

@@ -5089,7 +5089,7 @@ Function Get-AWSCloudTrailLogs {
 		.EXAMPLE
 			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
 
-			$Results = Get-AWSCloudTrailLogs -Filter @{ "eventName" : "CreateTag" } -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast2) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
+			$Results = Get-AWSCloudTrailLogs -Filter @{ "eventName" = "CreateTag" } -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast2) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
 
 			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-2 region and includes CreateTag API calls (this example is identitical to providing the parameter -APIs @("CreateTag") ).
 
