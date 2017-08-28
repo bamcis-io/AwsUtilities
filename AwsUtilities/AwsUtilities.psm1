@@ -5168,6 +5168,7 @@ Function Get-AWSCloudTrailLogs {
     )
 
     Begin {       
+		$S3TimeRegex = "^([0-9]{4})(0[0-9]|1[0-2])(0[0-9]|[1-2][0-9]|3[0-1])T(0[0-9]|1[0-9]|2[0-3])([0-5][0-9])Z$"
     }
 
     Process {
@@ -5219,11 +5220,12 @@ Function Get-AWSCloudTrailLogs {
 			{
                 [Amazon.S3.Model.S3Object]$FirstObject = $null
 
+				# DateTime is a struct/value type, so this creates a copy
                 [System.DateTime]$TempStart = $Start
 
                 while ($FirstObject -eq $null) 
 				{
-                    if ($TempStart -gt $End -or $TempStart -gt [System.DateTime]::Now) {
+                    if ($TempStart -gt $End -or $TempStart -gt [System.DateTime]::UtcNow) {
                         throw "No files could be found between the provided start and end times."
                     }
 
@@ -5238,6 +5240,8 @@ Function Get-AWSCloudTrailLogs {
                 Write-Verbose -Message "First key $($FirstObject.Key)"
 
                 # S3 will ignore this parameter after the first request if the ContinuationToken is set
+				# This will at least get us close to the right place to start, it will get the first log from that day (in UTC), although
+				# our start time may be minutes to hours after 00:00 AM on the specified day
                 $Request.StartAfter = $FirstObject.Key
             }
 
@@ -5254,24 +5258,47 @@ Function Get-AWSCloudTrailLogs {
                 foreach ($Object in $Response.S3Objects)
                 {
 					# Remove the known prefix from the key, and then split into the parts of the key path
+					# The filename is in this format: 415720405880_CloudTrail_us-east-1_20170825T0300Z_gFC6PugTVDycrQIy.json.gz
+					# Use the time here to create the $Time variable
+					# After removing the prefix we get 2017/08/25/415720405880_CloudTrail_us-east-1_20170825T0300Z_gFC6PugTVDycrQIy.json.gz
                     $Parts = $Object.Key.Remove(0, $Prefix.Length).Split("/")
-                    [System.DateTime]$Time = [System.DateTime]::Parse("$($Parts[1])/$($Parts[2])/$($Parts[0])")
+					
+					# Get the last part of the remainder
+					$FileName = $Parts[-1]
 
-					# You probably don't need to check the start since either we're using the start marker
-					# or everything will be greater than DateTime.MinValue
-                    if ($Time -ge $Start) {
-                        if ($Time -le $End) {
-                            $Files += $Object.Key
-                            Write-Verbose -Message "Adding key $($Object.Key)"
-                        }
-                        else 
-                        {
-                            # Otherwise we've gotten into objects that are past the end time
-                            # Go ahead and end the do/while loop and break from this foreach loop
-                            $Response.IsTruncated = $false
-                            break
-                        }
-                    }
+					# We need to use the time string in the file name because just parsing the DateTime with the year, month, day results in a time of 00:00 AM,
+					# which would be less than a time specified by the user like 06:00 AM, even if the log was actually posted at 07:00 AM
+					$FileNameParts = $FileName.Split("_")
+					$TimeString = $FileNameParts[3]
+
+					Write-Verbose -Message "Time from prefix $TimeString"
+					
+					if ($TimeString -match $S3TimeRegex)
+					{
+						[System.DateTime]$Time = [System.DateTime]::ParseExact($TimeString, "yyyyMMddTHHmmZ", [CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).ToUniversalTime()
+
+						# Check start to make sure the start marker or items after it weren't before the specified start hour/minute for the day
+						# The start marker is the first object for the specified day, but may not be after the specified time since the parsed date time
+						# for the start defaults to midnight 00:00 AM
+						if ($Time -ge $Start) {
+							if ($Time -le $End) {
+								$Files += $Object.Key
+								Write-Verbose -Message "Adding key $($Object.Key)"
+							}
+							else 
+							{
+								# Otherwise we've gotten into objects that are past the end time
+								# Go ahead and end the do/while loop and break from this foreach loop
+								Write-Verbose -Message "Passed end time with $Time."
+								$Response.IsTruncated = $false
+								break
+							}
+						}
+					}
+					else 
+					{
+						Write-Verbose -Message "$TimeString did not match the expected pattern for the timestamp in an S3 log."
+					}
                 }
 
                 $Request.ContinuationToken = $Response.NextContinuationToken
@@ -5282,82 +5309,88 @@ Function Get-AWSCloudTrailLogs {
             [Amazon.S3.Transfer.TransferUtilityOpenStreamRequest]$StreamRequest = New-Object -TypeName Amazon.S3.Transfer.TransferUtilityOpenStreamRequest
             $StreamRequest.BucketName = $Bucket
 
-            [PSCustomObject[]]$Results = ForEach-ObjectParallel -WaitTime 500 -InputObject $Files -Verbose -Parameters @{"Bucket" = $Bucket; "S3Client" = $S3Client; "APIs" = $APIs; "Filter" = $Filter } -ScriptBlock {
-                Param(
-                    [System.String]$File,
-                    [System.String]$Bucket,
-                    [Amazon.S3.IAmazonS3]$S3Client,
-                    [System.String[]]$APIs,
-					[System.Collections.Hashtable]$Filter
-                )
+			if ($Files.Length -gt 0)
+			{
+				[PSCustomObject[]]$Results = ForEach-ObjectParallel -WaitTime 500 -InputObject $Files -Verbose -Parameters @{"Bucket" = $Bucket; "S3Client" = $S3Client; "APIs" = $APIs; "Filter" = $Filter } -ScriptBlock {
+					Param(
+						[System.String]$File,
+						[System.String]$Bucket,
+						[Amazon.S3.IAmazonS3]$S3Client,
+						[System.String[]]$APIs,
+						[System.Collections.Hashtable]$Filter
+					)
 
-                try {
-                    [Amazon.S3.Transfer.TransferUtility]$TransferUtility = New-Object -TypeName Amazon.S3.Transfer.TransferUtility($S3Client)
-                    [Amazon.S3.Transfer.TransferUtilityOpenStreamRequest]$StreamRequest = New-Object -TypeName Amazon.S3.Transfer.TransferUtilityOpenStreamRequest
-                    $StreamRequest.BucketName = $Bucket
+					try {
+						[Amazon.S3.Transfer.TransferUtility]$TransferUtility = New-Object -TypeName Amazon.S3.Transfer.TransferUtility($S3Client)
+						[Amazon.S3.Transfer.TransferUtilityOpenStreamRequest]$StreamRequest = New-Object -TypeName Amazon.S3.Transfer.TransferUtilityOpenStreamRequest
+						$StreamRequest.BucketName = $Bucket
 
-                    $StreamRequest.Key = $File
-                    [System.IO.Stream]$Stream = $TransferUtility.OpenStream($StreamRequest)
-                    [System.IO.Compression.GZipStream]$GZipStream = New-Object -TypeName System.IO.Compression.GZipStream($Stream, [System.IO.Compression.CompressionMode]::Decompress)
+						$StreamRequest.Key = $File
+						[System.IO.Stream]$Stream = $TransferUtility.OpenStream($StreamRequest)
+						[System.IO.Compression.GZipStream]$GZipStream = New-Object -TypeName System.IO.Compression.GZipStream($Stream, [System.IO.Compression.CompressionMode]::Decompress)
 
-                    [System.IO.StreamReader]$Reader = New-Object -TypeName System.IO.StreamReader($GZipStream)
+						[System.IO.StreamReader]$Reader = New-Object -TypeName System.IO.StreamReader($GZipStream)
 
-                    $Content = $Reader.ReadToEnd()
+						$Content = $Reader.ReadToEnd()
 
-                    $Temp = ConvertFrom-Json -InputObject $Content
+						$Temp = ConvertFrom-Json -InputObject $Content
 
-                    [PSCustomObject[]]$Records = $null
+						[PSCustomObject[]]$Records = $null
 
-                    if ($APIs.Length -gt 0)
-                    {
-                        $Temp.Records = $Temp.Records | Where-Object {$_.eventName -iin $APIs}
-                    }
-					
-					if ($Filter.Count -gt 0)
-					{
-						foreach ($Item in $Filter.GetEnumerator())
+						if ($APIs.Length -gt 0)
 						{
-							$Parts = $Item.Key.Split(".")
+							$Temp.Records = $Temp.Records | Where-Object {$_.eventName -iin $APIs}
+						}
+					
+						if ($Filter.Count -gt 0)
+						{
+							foreach ($Item in $Filter.GetEnumerator())
+							{
+								$Parts = $Item.Key.Split(".")
 
-							$Temp.Records = $Temp.Records | Where-Object {
-								$TempVal = $_
+								$Temp.Records = $Temp.Records | Where-Object {
+									$TempVal = $_
 								
-								# This will expand the sub properties if the key is "dotted" like user.id
-								foreach ($Part in $Parts) {
-									$TempVal = $TempVal | Select-Object -ExpandProperty $Part
-								}
+									# This will expand the sub properties if the key is "dotted" like user.id
+									foreach ($Part in $Parts) {
+										$TempVal = $TempVal | Select-Object -ExpandProperty $Part
+									}
         
-								$TempVal -ilike $Item.Value
-							}    
+									$TempVal -ilike $Item.Value
+								}    
+							}
+						}
+                    
+						$Records = $Temp.Records
+
+						if ($Records -ne $null -and $Records.Length -gt 0) {                    
+							Write-Output -InputObject $Records
 						}
 					}
-                    
-					$Records = $Temp.Records
+					finally 
+					{
+						if ($Reader -ne $null) 
+						{
+							$Reader.Dispose()
+						}
 
-                    if ($Records -ne $null -and $Records.Length -gt 0) {                    
-                        Write-Output -InputObject $Records
-                    }
-                }
-                finally 
-                {
-                    if ($Reader -ne $null) 
-                    {
-                        $Reader.Dispose()
-                    }
+						if ($GZipStream -ne $null) 
+						{
+							$GZipStream.Dispose()
+						}
 
-                    if ($GZipStream -ne $null) 
-                    {
-                        $GZipStream.Dispose()
-                    }
+						if ($Stream -ne $null) 
+						{
+							$Stream.Dispose()       
+						}     
+					}
+				}
 
-                    if ($Stream -ne $null) 
-                    {
-                        $Stream.Dispose()       
-                    }     
-                }
-            }
-
-            Write-Output -InputObject $Results
+				Write-Output -InputObject $Results
+			}
+			else {
+				throw "No CloudTrail Log Files discovered between $Start and $End in $Bucket using prefix $Prefix."
+			}
         }
         else {
             throw "The bucket $Bucket could not be found in account $($Identity.Account)."

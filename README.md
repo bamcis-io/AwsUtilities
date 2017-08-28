@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.3.3
+Fixed minor bugs in the Get-AWSCloudTrailLogs cmdlet that didn't correctly convert the DateTime for an S3 CloudTrail log file to the actual UTC time.
+
 ### 1.0.3.2
 Fixed typos in examples.
 
