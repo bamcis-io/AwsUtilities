@@ -2037,6 +2037,8 @@ Function Copy-EBSVolume {
 					[Amazon.EC2.Model.TagDescription[]]$Tags = Get-EC2Tag -Filter @{Name="resource-id"; Value=$NewVol.VolumeId} @DestinationSplat
 					New-EC2Tag -Resource $NewVol.VolumeId -Tag $Tags @DestinationSplat
 				}
+
+				Write-Output -InputObject $NewVol
 			}
 
 			# Reset the counter for the next loop

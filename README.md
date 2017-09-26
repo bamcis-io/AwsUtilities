@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.3.5
+Fixed typo bug in mounting copied volumes.
+
 ### 1.0.3.4
 Removed the default parameter set from Copy-EBSVolume and allowed you to make encrypted EBS volume copies in the same AZ and region as the source. Added parameters to specify volume type and size and to copy tags from source to destination.
 
