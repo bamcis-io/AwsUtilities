@@ -1498,6 +1498,20 @@ Function Copy-EBSVolume {
 		.PARAMETER EncryptNewVolumes
 			This will encrypt the resulting volumes using the default AWS KMS key.	
 
+		.PARAMETER VolumeType
+			You can specify a single volume type for all newly created volumes. If this parameter is not specified, the source volume attributes are used to create the new volume, including the number of provisioned IOPS.
+
+		.PARAMETER Iops
+			Only valid for Provisioned IOPS SSD volumes when you specify Io1 for the VolumeType parameter. The number of I/O operations per second (IOPS) to provision for the volume, with a maximum ratio of 50 IOPS/GiB. Constraint: Range is 100 to 20000 for Provisioned IOPS SSD volumes.
+
+		.PARAMETER VolumeSize
+			If the source is an EBS Volume Id, or the OnlyRootDevice parameter is specified, a new Volume size can be specified for the resulting volume in GiBs. The size must be greater than or equal to the source.
+
+			Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
+
+		.PARAMETER CopyTags 
+			Specify this to copy the current tag values from the source volume(s) to the destination volume(s) and intermediate EBS snapshots.
+
 		.PARAMETER Region
 			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
 
@@ -1543,10 +1557,9 @@ Function Copy-EBSVolume {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 4/15/2017
+			LAST UPDATE: 9/26/2017
     #>
-
-    [CmdletBinding(DefaultParameterSetName = "DestinationByIdSourceByInstanceId")]
+    [CmdletBinding()]
     Param(
 		[Parameter(ParameterSetName = "SourceByInstanceId", Mandatory = $true)]
         [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceId", Mandatory = $true)]
@@ -1574,7 +1587,7 @@ Function Copy-EBSVolume {
         [System.String]$DestinationInstanceName,
 
         [Parameter()]
-        [switch]$OnlyRootDevice,
+        [Switch]$OnlyRootDevice,
 
         [Parameter()]
         [switch]$DeleteSnapshots,
@@ -1622,15 +1635,43 @@ Function Copy-EBSVolume {
 		[switch]$EncryptNewVolumes,
 
 		[Parameter()]
+		[Amazon.EC2.VolumeType]$VolumeType,
+
+		[Parameter()]
+		[ValidateRange(100, 20000)]
+		[System.Int32]$Iops,
+
+		[Parameter()]
 		[ValidateNotNull()]
-		[System.String]$KmsKeyId = [System.String]::Empty
+		[System.String]$KmsKeyId = [System.String]::Empty,
+
+		[Parameter()]
+		[Switch]$CopyTags
     )
+
+	DynamicParam 
+	{
+		[System.Management.Automation.RuntimeDefinedParameterDictionary]$ParamDictionary = New-Object -TypeName System.Management.Automation.RuntimeDefinedParameterDictionary
+
+		# If we're only targetting a single EBS volume, we can specify a new size
+		if ($PSBoundParameters.ContainsKey("SourceEBSVolumeId") -or $PSBoundParameters.ContainsKey("OnlyRootDevice"))
+		{
+			New-DynamicParameter -Name "VolumeSize" -Type ([System.Int32]) -ValidateRange @(1, 16384) -RuntimeParameterDictionary $ParamDictionary | Out-Null
+		}
+
+		Write-Output -InputObject $ParamDictionary
+	}
 
     Begin {
     }
 
     Process {
-		#Map the common AWS parameters
+		if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1 -and -not $PSBoundParameters.ContainsKey("Iops"))
+		{
+			throw "You must specify a number of IOPS if the destination volumes are of type Io1."			
+		}
+
+		# Map the common AWS parameters
 		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
 		[System.Collections.Hashtable]$SourceAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
 
@@ -1639,12 +1680,12 @@ Function Copy-EBSVolume {
 			$Region = [Amazon.RegionEndpoint]::GetBySystemName($SourceSplat.Region)
 		}
 		
-		#Map the common parameters, but with the destination Region
+		# Map the common parameters, but with the destination Region
 		[System.Collections.Hashtable]$DestinationSplat = New-AWSSplat -Region $DestinationRegion -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation
 		[System.Collections.Hashtable]$DestinationAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $DestinationSplat
 
-		#If the user did not specify a destination region, use the source region
-		#which could be specified, or be the default
+		# If the user did not specify a destination region, use the source region
+		# which could be specified, or be the default
 		if (-not $PSBoundParameters.ContainsKey("DestinationRegion"))
 		{
 			$DestinationSplat.Region = $SourceSplat.Region
@@ -1652,8 +1693,8 @@ Function Copy-EBSVolume {
 			$DestinationRegion = [Amazon.RegionEndpoint]::GetBySystemName($DestinationSplat.Region)
 		}
 
-		#The first step is to get the volume Ids attached to the instance we are trying to copy data from
-        [System.String[]]$EBSVolumeIds = @()
+		# The first step is to get the volume Ids attached to the instance we are trying to copy data from
+        [Amazon.EC2.Model.Volume[]]$EBSVolumes = @()
 
         switch -Wildcard ($PSCmdlet.ParameterSetName) {
             "*SourceByInstanceName" {
@@ -1662,7 +1703,7 @@ Function Copy-EBSVolume {
 
 				if ($Instance -ne $null)
 				{
-					#Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
 					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
 					{
 						$AvailabilityZone = $Instance.Placement.AvailabilityZone
@@ -1671,11 +1712,11 @@ Function Copy-EBSVolume {
 
 					if ($OnlyRootDevice)
 					{
-						$EBSVolumeIds = $Instance.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | Select-Object -First 1 -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
+						$EBSVolumes = $Instance.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | Select-Object -First 1 -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId	| Get-EC2Volume @SourceSplat
 					}
 					else
 					{
-						$EBSVolumeIds = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
+						$EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
 					}                        
 				}
 
@@ -1683,13 +1724,13 @@ Function Copy-EBSVolume {
             }
             "*SourceByInstanceId" {
                 
-                #This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
-                #so save the error output and don't strongly type it
+                # This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
+                # so save the error output and don't strongly type it
                 [Amazon.EC2.Model.Instance]$Instance  = Get-EC2InstanceByNameOrId -InstanceId $SourceInstanceId @SourceAWSUtilitiesSplat
 
                 if ($Instance -ne $null)
                 {
-					#Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
 					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
 					{
 						$AvailabilityZone = $Instance.Placement.AvailabilityZone
@@ -1698,29 +1739,30 @@ Function Copy-EBSVolume {
 
                     if ($OnlyRootDevice)
                     {
-						$EBSVolumeIds = $Instance.BlockDeviceMappings | `
+						$EBSVolumes = $Instance.BlockDeviceMappings | `
 							Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | `
 							Select-Object -ExpandProperty Ebs | `
-							Select-Object -First 1 -ExpandProperty VolumeId
+							Select-Object -First 1 -ExpandProperty VolumeId	| `
+							Get-EC2Volume @SourceSplat
                     }
                     else
                     {
-                        $EBSVolumeIds = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
+                        $EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
                     }                       
                 }
 
                 break
             }
             "*SourceByVolumeId" {
-				#This check just ensures the EC2 EBS volume exists
+				# This check just ensures the EC2 EBS volume exists
 
                 [Amazon.EC2.Model.Volume]$Volume = Get-EC2Volume -VolumeId $SourceEBSVolumeId @SourceSplat
                 
                 if ($Volume -ne $null)
                 {
-                    $EBSVolumeIds = @(($Volume | Select-Object -ExpandProperty VolumeId))
+                    $EBSVolumes = @($Volume)
 
-				    #Only update the AZ if a specific one wasn't specified and we're not moving cross region
+				    # Only update the AZ if a specific one wasn't specified and we're not moving cross region
 					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
 				    {
 					    $AvailabilityZone = $Volume.AvailabilityZone
@@ -1739,9 +1781,22 @@ Function Copy-EBSVolume {
             }
         }
 
-		#Retrieve the destination EC2 instance
-		#This needs to come after the instance retrieval because it may
-		#update the destination AZ
+		# Test this here so we can throw early and not go through creating snapshots before we find this out
+		# The dynamic param VolumeSize should only be added if there is 1 source volume, but
+		# but let's make sure
+		if ($PSBoundParameters.ContainsKey("VolumeSize") -and $EBSVolumes.Length -eq 1)
+		{
+			[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
+
+			if ($Size -lt $EBSVolumes[0].Size)
+			{
+				throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($EBSVolumes[0].Size) GiB."
+			}
+		}
+
+		# Retrieve the destination EC2 instance
+		# This needs to come after the instance retrieval because it may
+		# update the destination AZ
         [Amazon.EC2.Model.Instance]$Destination = $null
 
         switch -Wildcard ($PSCmdlet.ParameterSetName)
@@ -1761,8 +1816,8 @@ Function Copy-EBSVolume {
             default {
                 Write-Verbose -Message "A destination is not provided, so just creating the snapshots and volumes"
 
-				#If the AZ hasn't been specified previously because this is a cross region
-				#move, select a default one for the destination region
+				# If the AZ hasn't been specified previously because this is a cross region
+				# move, select a default one for the destination region
                 if ([System.String]::IsNullOrEmpty($AvailabilityZone))
                 {
                     $AvailabilityZone = Get-EC2AvailabilityZone -Region $DestinationRegion.SystemName | Where-Object {$_.State -eq [Amazon.EC2.AvailabilityZoneState]::Available} | Select-Object -First 1 -ExpandProperty ZoneName
@@ -1771,7 +1826,7 @@ Function Copy-EBSVolume {
             }
         }
 
-		#This will be used in the snapshot description
+		# This will be used in the snapshot description
 		[System.String]$Purpose = [System.String]::Empty
 
 		if ($Destination -ne $null)
@@ -1783,22 +1838,32 @@ Function Copy-EBSVolume {
 			$Purpose = $DestinationRegion.SystemName
 		}
 
-		#Create the snapshots at the source
-        [Amazon.EC2.Model.Snapshot[]]$Snapshots = $EBSVolumeIds | New-EC2Snapshot @SourceSplat -Description "TEMPORARY for $Purpose"
+		# Create the snapshots at the source
 
-		#Using a try here so the finally step will always delete the snapshots if specified
+        [Amazon.EC2.Model.Snapshot[]]$Snapshots = $EBSVolumes | ForEach-Object {
+			[Amazon.EC2.Model.Snapshot]$Snap = New-EC2Snapshot -VolumeId $_.VolumeId @SourceSplat -Description "TEMPORARY for $Purpose"
+
+			if ($CopyTags)
+			{
+				New-EC2Tag -Resource $Snap.SnapshotId -Tag $_.Tags @SourceSplat
+			}
+
+			Write-Output -InputObject $Snap
+		}
+
+		# Using a try here so the finally step will always delete the snapshots if specified
 		try
 		{
-			#Reset the counter for the next loop
+			# Reset the counter for the next loop
 			$Counter = 0
 
-			#While all of the snapshots have not completed, wait
+			# While all of the snapshots have not completed, wait
 			while (($Snapshots | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
 			{
 				$Completed = (($Snapshots | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $Snapshots.Length) * 100
 				Write-Progress -Activity "Creating snapshots" -Status "$Completed% Complete:" -PercentComplete $Completed
 
-				#Update their statuses
+				# Update their statuses
 				for ($i = 0; $i -lt $Snapshots.Length; $i++)
 				{
 					if ($Snapshots[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
@@ -1825,30 +1890,58 @@ Function Copy-EBSVolume {
 
 			[Amazon.EC2.Model.Snapshot[]]$SnapshotsToCreate = @()
 
-			#Reset the counter for the next loop
+			# Reset the counter for the next loop
 			$Counter = 0
 
-			#If this is a cross region move, copy the snapshots over
-			if ($DestinationRegion.SystemName -ne $Region.SystemName)
+			# If this is a cross region move, copy the snapshots over, or if we are going to encrypt the new volumes, create copies
+			if (($DestinationRegion.SystemName -ne $Region.SystemName) -or $EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))
 			{
-				Write-Verbose -Message "Copying snapshots from $($SourceSplat.Region) to $($DestinationSplat.Region)"
+				Write-Verbose -Message "Copying snapshots from $($SourceSplat.Region) to $($DestinationSplat.Region) using encryption: $($EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))"
 
-				[System.String[]]$NewIds = $Snapshots | Select-Object -ExpandProperty SnapshotId | Copy-EC2Snapshot -SourceRegion $SourceSplat.Region -Description "TEMPORARY for $Purpose" @DestinationSplat
-				$SnapshotsToCreate = $NewIds | Get-EC2Snapshot @DestinationSplat
+				# Create the encryption splat
+				[System.Collections.Hashtable]$EncryptionSplat = @{}
 
-				#While all of the snapshots have not completed, wait
+				if ($EncryptNewVolumes)
+				{
+					$EncryptionSplat.Add("Encrypted", $true)
+				}
+										  
+				if (-not [System.String]::IsNullOrEmpty($KmsKeyId))
+				{
+					$EncryptionSplat.Add("KmsKeyId", $KmsKeyId)
+				}
+
+				# Copy the Snapshots and get the new copied snapshot objects back
+				$SnapshotsToCreate = $Snapshots | ForEach-Object {
+					[System.String]$Id = Copy-EC2Snapshot -SourceSnapshotId $_.SnapshotId -SourceRegion $SourceSplat.Region -Description "COPY OF TEMPORARY for $Purpose" @DestinationSplat @EncryptionSplat
+					[Amazon.EC2.Model.Snapshot]$Snap = Get-EC2Snapshot -SnapshotId $Id @DestinationSplat
+					$Snap.VolumeId = $_.VolumeId
+
+					if ($CopyTags)
+					{
+						New-EC2Tag -Resource $Id -Tag ($EBSVolumes | Where-Object {$_.VolumeId -eq $Snap.VolumeId } | Select-Object -First 1 -ExpandProperty Tags) @DestinationSplat
+					}
+
+					Write-Output -InputObject $Snap
+				}
+
+				# While all of the snapshots have not completed, wait
 				while (($SnapshotsToCreate | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
 				{
 					$Completed = (($SnapshotsToCreate | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $SnapshotsToCreate.Length) * 100
-					Write-Progress -Activity "Creating snapshots" -Status "$Completed% Complete:" -PercentComplete $Completed
+					Write-Progress -Activity "Creating snapshot copies" -Status "$Completed% Complete:" -PercentComplete $Completed
 
-					#Update their statuses
+					# Update their statuses
 					for ($i = 0; $i -lt $SnapshotsToCreate.Length; $i++)
 					{
 						if ($SnapshotsToCreate[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
 						{
+							# This will ensure we have a VolumeId later that we can check on
+							# to compare the copied snapshot with the original volume
+							$TempVolId = $SnapshotsToCreate[$i].VolumeId
 							Write-Verbose -Message "Waiting on snapshot $($SnapshotsToCreate[$i].SnapshotId) copy to complete, currently at $($SnapshotsToCreate[$i].Progress) in state $($SnapshotsToCreate[$i].State)"
 							$SnapshotsToCreate[$i] = Get-EC2Snapshot -SnapshotId $SnapshotsToCreate[$i].SnapshotId @DestinationSplat
+							$SnapshotsToCreate[$i].VolumeId = $TempVolId
 						}
 					}
 
@@ -1869,36 +1962,87 @@ Function Copy-EBSVolume {
 			}
 			else
 			{
-				#Not a cross region move, so assign the current snapshots to the variable
-				#that we will evaluate to create the volumes from
+				# Not a cross region move, so assign the current snapshots to the variable
+				# that we will evaluate to create the volumes from
 
 				$SnapshotsToCreate = $Snapshots
 
-				#Empty the original array to be able to identify what needs
-				#to be deleted later
+				# Empty the original array to be able to identify what needs
+				# to be deleted later, otherwise the finally block will try to delete the 
+				# same snapshots twice
 				$Snapshots = @()
 			}
 
-			#If the cmdlet is told to encrypt the volumes or provides a specific KMS key, build the splat
-			#to send the encryption parameters
-			[System.Collections.HashTable]$NewVolumeSplat = @{}
+			# Create the new volumes from the newly created snapshots
+			# The destination splat will either have the new region if it was specified or will be the same as the source region
+			# The AZ was determined from the source instance if the source and destination region were the same, otherwise
+			# the AZ was selected from the Destination instance, if one was provided, if it wasn't, then a default AZ for the new region
+			# was selected
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = $SnapshotsToCreate | ForEach-Object {
+				[System.Collections.Hashtable]$NewVolumeSplat = @{}
 
-			if (($EncryptNewVolumes -eq $true) -or (-not [System.String]::IsNullOrEmpty($KmsKeyId)))
-			{
-				$NewVolumeSplat.Encrypted = $true
+				# Make sure we use the right volume type for the destination
+				if ($PSBoundParameters.ContainsKey("VolumeType"))
+				{
+					$NewVolumeSplat.Add("VolumeType", $VolumeType)
+
+					if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
+					{
+						# Make sure the maximum of 50 IOPS to GiB isn't exceeded
+						if ($Iops -le ($_.VolumeSize * 50))
+						{
+							$NewVolumeSplat.Add("Iops", $Iops)
+						}
+						else
+						{
+							Write-Warning -Message "The desired IOPS for the snapshot from $($_.VolumeId) exceed the maximum ratio of 50 IOPS / GiB. This has been throttled to $([System.Math]::Floor($_.VolumeSize) * 50)"
+							$NewVolumeSplat.Add("Iops", [System.Math]::Floor($_.VolumeSize) * 50)
+						}
+					}
+				}
+				else
+				{
+					Write-Verbose -Message "Retrieving source volume attributes for volume $($_.VolumeId)."
+					[Amazon.EC2.Model.Volume]$SourceVolume = $EBSVolumes | Where-Object {$_.VolumeId -eq $_.VolumeId} | Select-Object -First 1
+					$NewVolumeSplat.Add("VolumeType", $SourceVolume.VolumeType)
+
+					if ($SourceVolume.VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
+					{
+						$NewVolumeSplat.Add("Iops", $SourceVolume.Iops)
+					}
+				}
+
+				# The dynamic param VolumeSize should only be added if there is 1 source, but
+				# but let's make sure. We also validated earlier than if there was 1 source and this
+				# parameter was specified, that it wasn't smaller than the current volume size
+				if ($PSBoundParameters.ContainsKey("VolumeSize") -and $SnapshotsToCreate.Length -eq 1)
+				{
+					[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
+
+					# This check is probably unnecessary here since we checked earlier, but can't hurt
+					if ($Size -ge $_.VolumeSize)
+					{
+						$NewVolumeSplat.Add("Size", $Size)
+					}
+					else
+					{
+						throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($_.VolumeSize) GiB."
+					}
+				}
+
+				[Amazon.EC2.Model.Volume]$NewVol = New-EC2Volume -SnapshotId $_.SnapshotId -AvailabilityZone $AvailabilityZone @DestinationSplat @NewVolumeSplat
+
+				if ($CopyTags)
+				{
+					[Amazon.EC2.Model.TagDescription[]]$Tags = Get-EC2Tag -Filter @{Name="resource-id"; Value=$NewVol.VolumeId} @DestinationSplat
+					New-EC2Tag -Resource $NewVol.VolumeId -Tag $Tags @DestinationSplat
+				}
 			}
 
-			if (-not [System.String]::IsNullOrEmpty($KmsKeyId))
-			{
-				$NewVolumeSplat.KmsKeyId = $KmsKeyId
-			}
-
-			[Amazon.EC2.Model.Volume[]]$NewVolumes = $SnapshotsToCreate | New-EC2Volume -AvailabilityZone $AvailabilityZone @DestinationSplat @NewVolumeSplat
-
-			#Reset the counter for the next loop
+			# Reset the counter for the next loop
 			$Counter = 0
 
-			#Wait for the new volumes to become available before we try to attach them
+			# Wait for the new volumes to become available before we try to attach them
 			while (($NewVolumes | Where-Object {$_.State -ne [Amazon.EC2.VolumeState]::Available}) -ne $null -and $Counter -lt $Timeout)
 			{
 				$Completed = (($NewVolumes | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Length / $NewVolumes.Length) * 100
@@ -1928,7 +2072,7 @@ Function Copy-EBSVolume {
 				Write-Verbose -Message "All of the new volumes are available."
 			}
 
-			#Check if a destination instance was specified
+			# Check if a destination instance was specified
 			if ($Destination -ne $null)
 			{
 				Write-Verbose -Message "Mounting volumes."
@@ -1936,8 +2080,8 @@ Function Copy-EBSVolume {
 			}
 			elseif ($PSCmdlet.ParameterSetName -like ("DestinationBy*"))
 			{
-				#This means a destination instance was specified, but we didn't
-				#find it in the Get-EC2Instance cmdlet
+				# This means a destination instance was specified, but we didn't
+				# find it in the Get-EC2Instance cmdlet
 				Write-Warning -Message "[ERROR] Could not find the destination instance"
 			}
 
@@ -1947,7 +2091,7 @@ Function Copy-EBSVolume {
 		{		
 			if ($DeleteSnapshots)
 			{
-				#Delete the original source Region snapshots if there are any
+				# Delete the original source Region snapshots if there are any
 				if ($Snapshots -ne $null -and $Snapshots.Length -gt 0)
 				{
 					Write-Verbose -Message "Deleting snapshots $([System.String]::Join(",", ($Snapshots | Select-Object -ExpandProperty SnapshotId)))"
