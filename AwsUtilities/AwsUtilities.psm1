@@ -3343,7 +3343,7 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 		{
 			Write-Verbose -Message "Identified EC2 instance $($EC2.InstanceId)"
 
-			Set-EC2InstanceState -InstanceId $EC2.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
+			Set-EC2InstanceState -InstanceId $EC2.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
 
 			[System.String]$RootVolume = $EC2.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $EC2.RootDeviceName} | Select-Object -ExpandProperty Ebs | Select-Object -First 1 -ExpandProperty VolumeId
 
@@ -3627,7 +3627,7 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 					Write-Verbose -Message "Skipping modifying instance attributes to support enhanced networking."
 				}
 
-				$Result = Set-EC2InstanceState -InstanceId $EC2.InstanceId -State START @AwsUtilitiesSplat
+				$Result = Set-EC2InstanceState -InstanceId $EC2.InstanceId -State START -Force @AwsUtilitiesSplat
 			}
 			else
 			{
@@ -3714,6 +3714,7 @@ Function Set-EC2InstanceState {
 			AUTHOR: Michael Haken
 			LAST UPDATE: 6/30/2017
 	#>
+	[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "HIGH")]
 	Param(
 		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
 		[Alias("Name")]
@@ -3733,6 +3734,9 @@ Function Set-EC2InstanceState {
 
 		[Parameter()]
 		[Switch]$Wait,
+
+		[Parameter()]
+		[Switch]$Force,
 
 		[Parameter()]
 		[System.Int32]$Timeout = 600,
@@ -3789,90 +3793,98 @@ Function Set-EC2InstanceState {
 
 		Write-Verbose -Message "Current instance state: $($Instance.State.Name)."
 
-		switch ($State)
-		{
-			"STOP" {
-				if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopped -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopping -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::ShuttingDown)
-				{
-					$Result = Stop-EC2Instance -InstanceId $Instance.InstanceId @Splat
-				}
-				else
-				{
-					Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
-				}
+		$ConfirmMessage = "Are you sure you want to $State instance $($Instance.InstanceId)?"
 
-				$DesiredState = [Amazon.EC2.InstanceStateName]::Stopped
+		$WhatIfDescription = "$State $($Instance.InstanceId)."
+		$ConfirmCaption = "Change Instance State"
+
+		if ($Force -or $PSCmdlet.ShouldProcess($WhatIfDescription, $ConfirmMessage, $ConfirmCaption))
+		{
+			switch ($State)
+			{
+				"STOP" {
+					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopped -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopping -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::ShuttingDown)
+					{
+						$Result = Stop-EC2Instance -InstanceId $Instance.InstanceId @Splat
+					}
+					else
+					{
+						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+					}
+
+					$DesiredState = [Amazon.EC2.InstanceStateName]::Stopped
 				
-				break
-			}
-			"START" {
-				if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Running -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Pending)
-				{
-					$Result = Start-EC2Instance -InstanceId $Instance.InstanceId @Splat
+					break
 				}
-				else
-				{
-					Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+				"START" {
+					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Running -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Pending)
+					{
+						$Result = Start-EC2Instance -InstanceId $Instance.InstanceId @Splat
+					}
+					else
+					{
+						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+					}
+
+					$DesiredState = [Amazon.EC2.InstanceStateName]::Running
+
+					break
 				}
+				"RESTART" {
+					$Result = Restart-EC2Instance -InstanceId $Instance.InstanceId -PassThru @Splat
 
-				$DesiredState = [Amazon.EC2.InstanceStateName]::Running
+					$DesiredState = [Amazon.EC2.InstanceStateName]::Running
 
-				break
-			}
-			"RESTART" {
-				$Result = Restart-EC2Instance -InstanceId $Instance.InstanceId -PassThru @Splat
-
-				$DesiredState = [Amazon.EC2.InstanceStateName]::Running
-
-				break
-			}
-			"TERMINATE" {
-				if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Terminated)
-				{
-					$Result = Remove-EC2Instance -InstanceId $Instance.InstanceId -Force @Splat
+					break
 				}
-				else
-				{
-					Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+				"TERMINATE" {
+					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Terminated)
+					{
+						$Result = Remove-EC2Instance -InstanceId $Instance.InstanceId -Force @Splat
+					}
+					else
+					{
+						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+					}
+
+					$DesiredState = [Amazon.EC2.InstanceStateName]::Terminated
+
+					break
 				}
-
-				$DesiredState = [Amazon.EC2.InstanceStateName]::Terminated
-
-				break
+				default {
+					throw "Unexpected instance state provided: $State."
+				}
 			}
-			default {
-				throw "Unexpected instance state provided: $State."
-			}
-		}
 
-		if ($Wait -and $State -ne "RESTART")
-		{
-			Write-Host -Object "Waiting for EC2 instance $($Instance.InstanceId) to $State..."
-
-			[System.Int32]$Increment = 5
-			[System.Int32]$Counter = 0
-
-			while ($Instance.State.Name -ne $DesiredState -and $Counter -lt $Timeout)
+			if ($Wait -and $State -ne "RESTART")
 			{
-				Write-Verbose -Message "Waiting for $($Instance.InstanceId) to $State."
+				Write-Host -Object "Waiting for EC2 instance $($Instance.InstanceId) to $State..."
 
-				Start-Sleep -Seconds $Increment
-				$Counter += $Increment
+				[System.Int32]$Increment = 5
+				[System.Int32]$Counter = 0
 
-				$Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+				while ($Instance.State.Name -ne $DesiredState -and $Counter -lt $Timeout)
+				{
+					Write-Verbose -Message "Waiting for $($Instance.InstanceId) to $State."
+
+					Start-Sleep -Seconds $Increment
+					$Counter += $Increment
+
+					$Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+				}
+
+				if ($Counter -ge $Timeout)
+				{
+					throw "Timeout waiting for instance to $State."
+				}
+
+				Write-Verbose -Message "Successfully completed waiting for state change."
 			}
 
-			if ($Counter -ge $Timeout)
+			if ($PassThru)
 			{
-				throw "Timeout waiting for instance to $State."
+				Write-Output -InputObject $Result
 			}
-
-			Write-Verbose -Message "Successfully completed waiting for state change."
-		}
-
-		if ($PassThru)
-		{
-			Write-Output -InputObject $Result
 		}
 	}
 
@@ -4013,7 +4025,7 @@ Function Update-EC2InstanceAmiId {
 		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
 	
 		# Stop the source EC2 instance
-		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
+		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
 
 		[PSCustomObject[]]$BlockDevices = @()
 
@@ -4072,7 +4084,7 @@ Function Update-EC2InstanceAmiId {
 		Write-Verbose -Message "Deleting the original instance."
 		Write-Host -Object "Original instance AMI id: $($Instance.ImageId)"
 
-		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State TERMINATE -Wait -Timeout $Timeout @AwsUtilitiesSplat
+		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State TERMINATE -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
 
 		# Build some optional parameters for New-EC2Instance
 		[System.Collections.Hashtable]$NewInstanceSplat = @{}
@@ -4160,11 +4172,11 @@ Launching new instance:
 
 		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $Temp.Instances[0].InstanceId @AwsUtilitiesSplat
 
-		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Wait -Timeout $Timeout @AwsUtilitiesSplat
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
 
 		Write-Verbose -Message "Stopping new instance."
 
-		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State STOP -Wait -Timeout $Timeout @AwsUtilitiesSplat
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
 
 		if (-not [System.String]::IsNullOrEmpty($Instance.SriovNetSupport))
 		{
@@ -4341,7 +4353,7 @@ Launching new instance:
 
 		Write-Verbose -Message "Starting instance."
 
-		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START @AwsUtilitiesSplat 
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Force @AwsUtilitiesSplat 
 	}
 
 	End {
@@ -5545,4 +5557,698 @@ Function Get-AWSCloudTrailLogs {
 
     End {
     }
+}
+
+Function Move-EC2Instance {
+	<#
+		.SYNOPSIS
+			Moves an EC2 instance from a source region to a different target region.
+
+		.DESCRIPTION
+			This cmdlet moves 1 or more EC2 instances from a source region to a different target region by creating a new AMI of the source in the
+			target region. The user will then need to manually deploy the EC2 instance into the desired VPC from the AMI. The cmdlet will also optionally
+			cleanup the source region region by deleting the source EC2 instance(s) and source AMI(s).
+
+			Each specified instance will be stopped before having an AMI created from it to ensure consistency of all EBS volumes.
+
+		.PARAMETER InstanceIds
+			The source EC2 instances to move.
+
+		.PARAMETER DestinationRegion
+			The region the new AMIs will be created in.
+
+		.PARAMETER Encrypt
+			Specifies that the destination AMIs will use encrypted EBS volumes.
+
+		.PARAMETER Cleanup
+			If specified, the source EC2 instances and source AMIs that are created will all be deleted once the destination AMIs have been successfully created.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked and that the source EC2 instances are in. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$AMIs = Move-EC2Instance -InstanceIds @("i-033b1455fc5c3b386") -DestinationRegion ([Amazon.RegionEndpoint]::UsEast1) -Region ([Amazon.RegionEndpoint]::UsEast2) -CleanupSource -ProfileName "mylab"
+		
+			This example moves the instance i-033b1455fc5c3b386 to us-east-1 from us-east-2 and deletes the source instance and its intermediate AMI. The resulting AMI id is returned to the pipeline.
+
+		.INPUTS
+			System.String[]
+
+		.OUTPUTS
+			System.String[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 12/12/2017
+
+	#>
+	[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "HIGH")]
+	[OutputType([System.String[]])]
+	Param(
+		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[System.String[]]$InstanceIds,
+
+		[Parameter(Mandatory = $true)]
+		[Amazon.RegionEndpoint]$DestinationRegion,
+
+		[Parameter()]
+		[Switch]$Encrypt = $false,
+
+		[Parameter()]
+		[Switch]$CleanupSource,
+
+		[Parameter()]
+		[Switch]$Force,
+
+		[Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+
+	}
+
+	Process {
+		Initialize-AWSDefaults
+
+        if ($Region -eq $null) {
+            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
+        }
+
+        [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$DestinationSplat = New-AWSSplat -Region $DestinationRegion -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$UtilSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
+
+		$ConfirmMessage = "Are you sure you want to stop and copy $($InstanceIds.Length) EC2 instance$(if ($Instances.Length -gt 1){"s"}) from $Region to $DestinationRegion`?"
+
+		$WhatIfDescription = "Stopped and moved $($InstanceIds.Length) EC2 instance$(if ($Instances.Length -gt 1){"s"}) from $Region to $DestinationRegion."
+		$ConfirmCaption = "Move Instances"
+
+		if ($Force -or $PSCmdlet.ShouldProcess($WhatIfDescription, $ConfirmMessage, $ConfirmCaption))
+		{
+			[System.Collections.Hashtable]$Tracking = @{}
+
+			# Create a collection
+			$WaitingOn = {@()}.Invoke()
+
+			foreach ($Id in $InstanceIds)
+			{
+				Write-Verbose -Message "Stopping instance $Id."
+				Set-EC2InstanceState -InstanceId $Id -State STOP -Force @UtilSplat
+				$WaitingOn.Add($Id)
+				$Tracking.Add($Id, @{})
+			}
+
+			[System.Collections.Hashtable]$NewAmis = @{}
+
+			while ($WaitingOn.Length -gt 0)
+			{
+				Write-Verbose -Message "Waiting for all instances to stop."
+				Start-Sleep -Seconds 10
+
+				[System.String[]]$Temp = $WaitingOn
+			
+				foreach ($Item in $Temp)
+				{
+					[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId -InstanceId $Item @UtilSplat
+
+					if ($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Stopped)
+					{
+						try
+						{
+							Write-Verbose -Message "Creating new AMI for $($Instance.InstanceId)."
+							$Desc = Get-EC2Image -ImageId $Instance.ImageId @SourceSplat | Select-Object -ExpandProperty Name
+
+							$Name = $Instance.InstanceId
+
+							if (($Instance.Tags | Where-Object {$_.Key -ieq "Name"}).Length -gt 0)
+							{
+								$Name = $Instance.Tags | Where-Object {$_.Key -ieq "Name"} | Select-Object -First 1 -ExpandProperty Value
+							}
+
+							$ImageId = New-EC2Image -InstanceId $Instance.InstanceId -Name $Name -Description $Desc @SourceSplat
+							Write-Verbose -Message "New AMI is $ImageId."
+							$NewAmis.Add($ImageId, @{"Name" = $Name; "Description" = $Desc; "InstanceId" = $Instance.InstanceId})
+						}
+						catch [Exception] 
+						{
+							Write-Warning -Message "Could not create a new image for $($Instance.InstanceId):`r`n$(ConvertTo-Json -InputObject $_.Exception)"
+						}
+						finally 
+						{
+							$WaitingOn.Remove($Item) | Out-Null
+						}
+					}
+				}
+			}
+		
+			[System.Collections.Hashtable]$FinalAmis = @{}
+
+			while ($NewAmis.Count -gt 0)
+			{
+				Write-Verbose -Message "Waiting for all source AMIs to be created."
+				Start-Sleep -Seconds 10
+
+				[System.Collections.Hashtable]$Temp = $NewAmis.Clone()
+
+				foreach ($Ami in $Temp.GetEnumerator())
+				{
+					[Amazon.EC2.Model.Image]$Image = Get-EC2Image -ImageId $Ami.Key @SourceSplat
+
+					if ($Image.State -eq [Amazon.EC2.ImageState]::Available)
+					{
+						try {
+							Write-Verbose -Message "Copying AMI $($Ami.Key) to $DestinationRegion from $Region."
+							[System.Boolean]$Encrypted = $Encrypt
+							$NewAmiId = Copy-EC2Image -SourceImageId $Ami.Key -Description $Ami.Value.Description -Name $Ami.Value.Name -Encrypted $Encrypted -SourceRegion $Region.SystemName @DestinationSplat
+							$FinalAmis.Add($NewAmiId, $Ami.Value.Name)
+							Write-Verbose -Message "Successfully initiated copy operation."
+
+							if ($CleanupSource)
+							{
+								Write-Verbose -Message "Cleaning up source for $($Ami.InstanceId)."
+								Set-EC2InstanceState -InstanceId $Ami.InstanceId -State TERMINATE -Force @UtilSplat
+								Unregister-EC2Image -ImageId $Ami.Key @SourceSplat 
+							}
+						}
+						catch [Exception]
+						{
+							Write-Warning -Message "Could not copy the AMI $($Ami.Key):`r`n$($_.Exception.Message)"
+						}
+						finally
+						{
+							$NewAmis.Remove($Ami.Key)
+						}
+					}
+				}
+			}
+
+			if ($CleanupSource)
+			{
+				Write-Verbose -Message "Deleting source EC2 instances."
+				foreach ($Id in $InstancesToDelete)
+				{
+					Write-Verbose -Message "Deleting instance $Id."
+					Set-EC2InstanceState -InstanceId $Id -State TERMINATE -Force @SourceSplat
+				}
+
+				Write-Verbose -Message "Deleting source AMIs."
+
+				foreach ($Id in $NewAmiIds)
+				{
+					Write-Verbose -Message "Deleting AMI $Id."
+					Unregister-EC2Image -ImageId $Id @SourceSplat
+				}
+			}
+
+			Write-Output -InputObject $FinalAmis
+		}
+	}
+
+	End {
+
+	}
+}
+
+Function Invoke-AWSTemporaryLogin {
+
+	[CmdletBinding(DefaultParameterSetName = "NoMFA")]
+	[OutputType([Amazon.SecurityToken.Model.Credentials])]
+	Param(
+		[Parameter(ParameterSetName = "Virtual", Mandatory = $true)]
+		[Switch]$UseVirtualMFA,
+
+		[Parameter(ParameterSetName = "Physical", Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$TokenSerialNumber,
+
+		[Parameter(ParameterSetName = "Virtual")]
+        [Parameter(ParameterSetName = "Physical")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$TokenCode,
+
+        [Parameter()]
+        [ValidateRange(900, 129600)]
+        [System.Int32]$DurationInSeconds = 43200,
+
+		[Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+
+	}
+
+	Process {
+		Initialize-AWSDefaults
+
+        if ($Region -eq $null) {
+            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
+        }
+
+        [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		if ($UseVirtualMFA)
+		{
+			[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
+			$Regex = "^(arn:aws(?:-us-gov|-cn)?:iam::[0-9]{12}:)user(\/.*)$"
+
+            $TokenSerialNumber = $Arn -replace $Regex, '$1mfa$2'			
+		}
+
+        [System.Collections.Hashtable]$TokenSplat = @{}
+
+        if ($PSCmdlet.ParameterSetName -eq "Virtual" -or $PSCmdlet.ParameterSetName -eq "Physical" )
+        {
+            if (-not $PSBoundParameters.ContainsKey("TokenCode"))
+            {
+                $TokenCode = Read-Host -Prompt "Enter MFA token code"
+            }
+
+            $TokenSplat.Add("SerialNumber", $TokenSerialNumber)
+            $TokenSplat.Add("TokenCode", $TokenCode)
+        }
+
+        Write-Output -InputObject (Get-STSSessionToken -DurationInSeconds $DurationInSeconds @SourceSplat @TokenSplat)
+	}
+
+	End {
+
+	}
+}
+
+Function Invoke-AWSCrossAccountCommand {
+
+	[CmdletBinding(DefaultParameterSetName = "Public")]
+	Param(
+		[Parameter(Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[ValidatePattern("^[0-9]{12}$")]
+		[System.String]$AccountId,
+
+		[Parameter(Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Role,
+
+		[Parameter()]
+        [ValidateRange(900, 3600)]
+        [System.Int32]$DurationInSeconds = 3600,
+
+		[Parameter(ParameterSetName = "Virtual", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Virtual-GovCloud", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Virtual-China", Mandatory = $true)]
+		[Switch]$UseVirtualMFA,
+
+		[Parameter(ParameterSetName = "Physical", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Physical-GovCloud", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Physical-China", Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$TokenSerialNumber,
+
+		[Parameter(ParameterSetName = "Virtual")]
+		[Parameter(ParameterSetName = "Virtual-GovCloud")]
+		[Parameter(ParameterSetName = "Virtual-China")]
+		[Parameter(ParameterSetName = "Physical")]
+		[Parameter(ParameterSetName = "Physical-GovCloud")]
+		[Parameter(ParameterSetName = "Physical-China")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$TokenCode,
+
+		[Parameter(ParameterSetName = "GovCloud")]
+		[Parameter(ParameterSetName = "Virtual-GovCloud", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Physical-GovCloud", Mandatory = $true)]
+		[Switch]$GovCloud,
+
+		[Parameter(ParameterSetName = "China")]
+		[Parameter(ParameterSetName = "Virtual-China", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Physical-China", Mandatory = $true)]
+		[Switch]$China,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[ValidatePattern("^[-a-zA-Z0-9=,.@:\/]+$")]
+		[System.String]$ExternalId,
+
+		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[ValidateNotNull()]
+		[ScriptBlock]$ScriptBlock,
+
+		[Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		Initialize-AWSDefaults
+
+        if ($Region -eq $null) {
+            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
+        }
+
+        [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$UtilSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
+
+		$Aws = "aws"
+
+		if ($GovCloud)
+		{
+			$Aws = "aws-us-gov"
+		}
+
+		if ($China)
+		{
+			$Aws ="aws-cn"
+		}
+
+		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
+
+		$Arn = "arn:$Aws`:iam::$AccountId`:role/$Role"
+		$RoleSessionName = "$($Identity.Arn.Substring($Identity.Arn.LastIndexOf("/") + 1))_$AccountId"
+
+		[System.Collections.Hashtable]$RoleSplat = @{}
+
+		if ($PSBoundParameters.ContainsKey("ExternalId"))
+		{
+			$RoleSplat.Add("ExternalId", $ExternalId)
+		}
+
+		if ($UseVirtualMFA)
+		{
+			[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
+			$Regex = "^(arn:aws(?:-us-gov|-cn)?:iam::[0-9]{12}:)user(\/.*)$"
+
+            $TokenSerialNumber = $Arn -replace $Regex, '$1mfa$2'			
+		}
+
+        [System.Collections.Hashtable]$TokenSplat = @{}
+
+        if ($PSCmdlet.ParameterSetName -ilike "Virtual*" -or $PSCmdlet.ParameterSetName -ilike "Physical*" )
+        {
+            if (-not $PSBoundParameters.ContainsKey("TokenCode"))
+            {
+                $TokenCode = Read-Host -Prompt "Enter MFA token code"
+            }
+
+            $TokenSplat.Add("SerialNumber", $TokenSerialNumber)
+            $TokenSplat.Add("TokenCode", $TokenCode)
+        }
+
+		$RemoteCredentials = Use-STSRole -RoleArn $Arn -RoleSessionName $RoleSessionName -DurationInSeconds $DurationInSeconds @RoleSplat @SourceSplat @TokenSplat
+
+		Set-AWSCredential -Credential $RemoteCredentials.Credentials
+
+		& $ScriptBlock
+
+		Clear-AWSCredential
+	}
+
+	End {
+	}
+}
+
+Function Get-AWSSupportCaseList {
+	<#
+
+	#>
+	[CmdletBinding()]
+	[OutputType([System.Management.Automation.PSCustomObject[]])]
+	Param(
+		[Parameter()]
+		[ValidateRange(1, [System.Int32]::MaxValue)]
+		[System.Int32]$BatchSize = 20,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.DateTime]$AfterTime,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.DateTime]$BeforeTime,
+
+		[Parameter()]
+		[Switch]$IncludeResolvedCases,
+
+		[Parameter()]
+		[Switch]$IncludeAllCommunication,
+
+		[Parameter()]
+		[ValidateLength(1, 100)]
+		[System.String[]]$CaseIdList = @(),
+
+		[Parameter()]
+		[System.String]$Language,
+
+		[Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	
+	Begin {
+	}
+
+	Process {
+		Initialize-AWSDefaults
+
+        if ($Region -eq $null) {
+            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
+        }
+
+        [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$UtilSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
+
+		[System.Collections.Hashtable]$CaseSplat = @{}
+
+		if ($PSBoundParameters.ContainsKey("AfterTime"))
+		{
+			$CaseSplat.Add("AfterTime", $AfterTime.ToString("yyyy-MM-ddTHH:mmZ"))
+		}
+
+		if ($PSBoundParameters.ContainsKey("BeforeTime"))
+		{
+			$CaseSplat.Add("BeforeTime", $BeforeTime.ToString("yyyy-MM-ddTHH:mmZ"))
+		}
+
+		if ($PSBoundParameters.ContainsKey("CaseIdList"))
+		{
+			$CaseSplat.Add("CaseIdList", $CaseIdList)
+		}
+
+		if ($PSBoundParameters.ContainsKey("Language"))
+		{
+			$CaseSplat.Add("Language", $Language)
+		}
+
+		$NextToken = $null
+		[PSCustomObject[]]$Results = @()
+		do {
+			[Amazon.AWSSupport.Model.CaseDetails[]]$Cases = Get-ASACase -NextToken $NextToken -MaxResult $BatchSize -IncludeResolvedCase ($IncludeResolvedCases -eq $true) @SourceSplat @CaseSplat
+
+			foreach ($Case in $Cases) 
+			{
+				# Make sure to do this first so the last service response isn't overwritten by getting additional communication items
+				$NextToken = $AWSHistory.LastServiceResponse.NextToken
+
+				# The five most recent communications associated with the case.
+                [System.String[]]$Comms = $Case.RecentCommunications.Communications | 
+                    Where-Object {$_ -ne $null -and $_.Length -gt 0} |
+					Select-Object -Property @{Name="comms";Expression={"$($_.TimeCreated) : $($_.Body)"}} | 
+					Select-Object -ExpandProperty comms
+
+				# No recent communications
+                if ($Comms -eq $null -or $Comms.Length -eq 0)
+                {
+                    $Comms = @("No Case History")
+                }
+				# If we want to get all communication in the past 12 months, and there are more communication items
+				elseif ($IncludeAllCommunication -and -not [System.String]::IsNullOrEmpty($Case.RecentCommunications.NextToken))
+				{
+					$CommNextToken = $Case.RecentCommunications.NextToken
+
+					[System.Collections.Hashtable]$CommSplat = @{}
+
+					if ($PSBoundParameters.ContainsKey("AfterTime"))
+					{
+						$CommSplat.Add("AfterTime", $AfterTime.ToString("yyyy-MM-ddTHH:mmZ"))
+					}
+
+					if ($PSBoundParameters.ContainsKey("BeforeTime"))
+					{
+						$CommSplat.Add("BeforeTime", $BeforeTime.ToString("yyyy-MM-ddTHH:mmZ"))
+					}
+
+					do {
+						Write-Verbose -Message "Retrieving additional communications for $($Case.CaseId)."
+
+						[Amazon.AWSSupport.Model.Communication[]]$CommResults = Get-ASACommunication -CaseId $Case.CaseId -MaxResult $BatchSize -NextToken $CommNextToken @SourceSplat @CommSplat
+						$Comms += $CommResults |
+							Where-Object {$_ -ne $null -and $_.Length -gt 0} |
+							Select-Object -Property @{Name="comms";Expression={"$($_.TimeCreated) : $($_.Body)"}} | 
+							Select-Object -ExpandProperty comms
+						
+						$CommNextToken = $AWSHistory.LastServiceResponse.NextToken
+
+					} while ($CommNextToken -ne $null)
+				}
+
+				#CaseId               : case-490416305747-muen-2017-5dc8d9fa34a8e740
+				#CategoryCode         : instance-issue
+				#CcEmailAddresses     : {trusahoo@in.ibm.com, navin.nagar@in.ibm.com}
+				#DisplayId            : 4306238771
+				#Language             : en
+				#RecentCommunications : Amazon.AWSSupport.Model.RecentCaseCommunications
+				#ServiceCode          : amazon-elastic-compute-cloud-linux
+				#SeverityCode         : low
+				#Status               : resolved
+				#Subject              : Chat: High utilization traffic on Singapore location
+				#SubmittedBy          : aws-dl-490416305747-admin@blackboard.com
+				#TimeCreated          : 2017-08-22T14:41:48.000Z
+
+                $Results += ([PSCustomObject]@{
+                    CaseId = $Case.CaseId
+					CategoryCode = $Case.CategoryCode
+					CcEmailAddresses = $Case.CcEmailAddresses
+					DisplayId = $Case.DisplayId
+					Language = $Case.Language
+					RecentCommunications = [System.String]::Join("`r`n`r`n", $Comms)
+					ServiceCode = $Case.ServiceCode
+					SeverityCode = $Case.SeverityCode
+					Status = $Case.Status
+					Subject = $Case.Subject
+					SubmittedBy = $Case.SubmittedBy
+					TimeCreated = $Case.TimeCreated
+                })
+			}
+		} while ($NextToken -ne $null)
+
+		Write-Output -InputObject $Results
+	}
+
+	End {
+	}
 }
