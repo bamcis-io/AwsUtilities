@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.4.0
+Added cmdlets: Move-EC2Instance, Invoke-AWSTemporaryLogin, Invoke-AWSCrossAccountCommand, Get-AWSSupportCaseList, Get-AWSVpcPeeringSummary, and Get-AWSIAMRoleSummary.
+
 ### 1.0.3.5
 Fixed typo bug in mounting copied volumes.
 

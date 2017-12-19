@@ -11,6 +11,7 @@ $script:IPRangeUrl = "https://ip-ranges.amazonaws.com/ip-ranges.json"
 
 #Make the variable $AWSRegions available to all of the cmdlets
 Set-Variable -Name AWSRegions -Value (@((Get-AWSRegion -GovCloudOnly | Select-Object -ExpandProperty Region), (Get-AWSRegion -IncludeChina | Select-Object -ExpandProperty Region)) | Select-Object -Unique)
+Set-Variable -Name AWSPublicRegions -Value @(Get-AWSRegion | Select-Object -ExpandProperty Region)
 
 Function Get-S3ETagCalculation {
 	<#
@@ -5820,7 +5821,74 @@ Function Move-EC2Instance {
 }
 
 Function Invoke-AWSTemporaryLogin {
+	<#
+		.SYNOPSIS
+			Provides a wrapper around Get-STSSessionToken to include providing MFA credentials.
 
+		.DESCRIPTION
+			This cmdlet executes a Get-STSSessionToken while also optionally including a session token from a virtual or physical
+			MFA device. This temporary credential can then be used for additional cmdlets or cross account access commands to prevent
+			the need to re-enter MFA credentials each time.
+
+		.PARAMETER UseVirtualMFA
+			Specifies that an AWS virtual MFA is being used.
+
+		.PARAMETER TokenSerialNumber
+			The serial number of the physical MFA token.
+
+		.PARAMETER TokenCode
+			The current MFA token code, if this is not specified, but either UseVirtualMFA or TokenSerialNumber are specified, you will be prompted
+			to enter the token code.
+
+		.PARAMETER DurationInSeconds
+			The length of time the temporary credentials are good for between 900 and 129600 seconds. This defaults to 43200, which is 12 hours.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$Creds = Invoke-AWSTemporaryLogin -ProfileName my-jump-account -Verbose -UseVirtualMFA -TokenCode 527268
+			Invoke-AWSCrossAccountCommand -Credential $Creds -ScriptBlock { Get-IAMRoleList } -AccountId 123456789012 -Role PowerUserRole
+
+			This example gets temporary credentials in the account specified in the profile "my-jump-account" that utilizes a virtual MFA. This account may
+			or may not require MFA. Once those credentials are acquired, they are used to access the remote AWS account, 123456789012, via cross account access.
+			This remote account does require MFA for the cross account assume role to the PowerUserRole. The cmdlet, Get-IAMRoleList is executed in the remote account
+			and then the credentials are reset to the state before the cross account command was executed.
+
+		.INPUTS 
+			None
+
+		.OUTPUTS
+			Amazon.SecurityToken.Model.Credentials
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 12/18/2017
+	#>
 	[CmdletBinding(DefaultParameterSetName = "NoMFA")]
 	[OutputType([Amazon.SecurityToken.Model.Credentials])]
 	Param(
@@ -5870,7 +5938,6 @@ Function Invoke-AWSTemporaryLogin {
 	)
 
 	Begin {
-
 	}
 
 	Process {
@@ -5887,7 +5954,7 @@ Function Invoke-AWSTemporaryLogin {
 			[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
 			$Regex = "^(arn:aws(?:-us-gov|-cn)?:iam::[0-9]{12}:)user(\/.*)$"
 
-            $TokenSerialNumber = $Arn -replace $Regex, '$1mfa$2'			
+            $TokenSerialNumber = $Identity.Arn -replace $Regex, '$1mfa$2'			
 		}
 
         [System.Collections.Hashtable]$TokenSplat = @{}
@@ -5912,8 +5979,93 @@ Function Invoke-AWSTemporaryLogin {
 }
 
 Function Invoke-AWSCrossAccountCommand {
+	<#
+		.SYNOPSIS
+			Executes an assume role into another account with the provided credentials and executes a scriptblock.
 
-	[CmdletBinding(DefaultParameterSetName = "Public")]
+		.DESCRIPTION
+			This cmdlet executes a Use-STSRole in the account number specified with the supplied credentials. The role specified is assumed, 
+			the default credentials are updated, the scriptblock is run, and the temporary credentials are then removed. The cmdlet effectively
+			lets you run entire scripts in remote account accounts via cross account access.
+
+		.PARAMETER AccountId
+			The 12 digit account id to run the scriptblock in.
+
+		.PARAMETER Role
+			The role name to assume in the remote account.
+
+		.PARAMETER ExternalId
+			The external id provided by the central jump account for this remote account.
+
+		.PARAMETER ScriptBlock
+			The block of script to execute in the remote account.
+
+		.PARAMETER FilePath
+			The path to the script to execute against the remote account.
+
+		.PARAMETER UseVirtualMFA
+			Specifies that an AWS virtual MFA is being used.
+
+		.PARAMETER TokenSerialNumber
+			The serial number of the physical MFA token.
+
+		.PARAMETER TokenCode
+			The current MFA token code, if this is not specified, but either UseVirtualMFA or TokenSerialNumber are specified, you will be prompted
+			to enter the token code.
+
+		.PARAMETER DurationInSeconds
+			The length of time the temporary credentials are good for between 900 and 3600 seconds. This defaults to 3600, which is 1 hour.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$Creds = Invoke-AWSTemporaryLogin -ProfileName my-jump-account -Verbose -UseVirtualMFA -TokenCode 527268
+			Invoke-AWSCrossAccountCommand -Credential $Creds -ScriptBlock { Get-IAMRoleList } -AccountId 123456789012 -Role PowerUserRole
+
+			This example gets temporary credentials in the account specified in the profile "my-jump-account" that utilizes a virtual MFA. This account may
+			or may not require MFA. Once those credentials are acquired, they are used to access the remote AWS account, 123456789012, via cross account access.
+			This remote account does require MFA for the cross account assume role to the PowerUserRole. The cmdlet, Get-IAMRoleList is executed in the remote account
+			and then the credentials are reset to the state before the cross account command was executed.
+
+		.INPUTS 
+			None
+
+		.OUTPUTS
+			Ouput of the invoked command.
+
+			The output type is the value of the ScriptBlock parameter or the FilePath parameter.
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 12/18/2017
+	#>
+	[CmdletBinding(DefaultParameterSetName = "NoMFA-SB")]
+	[OutputType()]
 	Param(
 		[Parameter(Mandatory = $true)]
 		[ValidateNotNullOrEmpty()]
@@ -5928,45 +6080,41 @@ Function Invoke-AWSCrossAccountCommand {
         [ValidateRange(900, 3600)]
         [System.Int32]$DurationInSeconds = 3600,
 
-		[Parameter(ParameterSetName = "Virtual", Mandatory = $true)]
-		[Parameter(ParameterSetName = "Virtual-GovCloud", Mandatory = $true)]
-		[Parameter(ParameterSetName = "Virtual-China", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Virtual-SB", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Virtual-File", Mandatory = $true)]
 		[Switch]$UseVirtualMFA,
 
-		[Parameter(ParameterSetName = "Physical", Mandatory = $true)]
-		[Parameter(ParameterSetName = "Physical-GovCloud", Mandatory = $true)]
-		[Parameter(ParameterSetName = "Physical-China", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Physical-SB", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Physical-File", Mandatory = $true)]
 		[ValidateNotNullOrEmpty()]
 		[System.String]$TokenSerialNumber,
 
-		[Parameter(ParameterSetName = "Virtual")]
-		[Parameter(ParameterSetName = "Virtual-GovCloud")]
-		[Parameter(ParameterSetName = "Virtual-China")]
-		[Parameter(ParameterSetName = "Physical")]
-		[Parameter(ParameterSetName = "Physical-GovCloud")]
-		[Parameter(ParameterSetName = "Physical-China")]
+		[Parameter(ParameterSetName = "Virtual-SB")]
+		[Parameter(ParameterSetName = "Virtual-File")]
+		[Parameter(ParameterSetName = "Physical-SB")]
+		[Parameter(ParameterSetName = "Physical-File")]
 		[ValidateNotNullOrEmpty()]
 		[System.String]$TokenCode,
-
-		[Parameter(ParameterSetName = "GovCloud")]
-		[Parameter(ParameterSetName = "Virtual-GovCloud", Mandatory = $true)]
-		[Parameter(ParameterSetName = "Physical-GovCloud", Mandatory = $true)]
-		[Switch]$GovCloud,
-
-		[Parameter(ParameterSetName = "China")]
-		[Parameter(ParameterSetName = "Virtual-China", Mandatory = $true)]
-		[Parameter(ParameterSetName = "Physical-China", Mandatory = $true)]
-		[Switch]$China,
 
 		[Parameter()]
 		[ValidateNotNullOrEmpty()]
 		[ValidatePattern("^[-a-zA-Z0-9=,.@:\/]+$")]
 		[System.String]$ExternalId,
 
-		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[Parameter(ParameterSetName = "Virtual-SB", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[Parameter(ParameterSetName = "Physcial-SB", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[Parameter(ParameterSetName = "NoMFA-SB", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
 		[ValidateNotNull()]
 		[ScriptBlock]$ScriptBlock,
 
+		[Parameter(ParameterSetName = "Virtual-File", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[Parameter(ParameterSetName = "Physical-File", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[Parameter(ParameterSetName = "NoMFA-File", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[ValidateScript({
+			Test-Path -Path $_
+		})]
+		[System.String]$FilePath,
+		
 		[Parameter()]
         [ValidateNotNull()]
         [Amazon.RegionEndpoint]$Region,
@@ -6007,23 +6155,12 @@ Function Invoke-AWSCrossAccountCommand {
         }
 
         [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		[System.Collections.Hashtable]$UtilSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
-
-		$Aws = "aws"
-
-		if ($GovCloud)
-		{
-			$Aws = "aws-us-gov"
-		}
-
-		if ($China)
-		{
-			$Aws ="aws-cn"
-		}
 
 		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
 
-		$Arn = "arn:$Aws`:iam::$AccountId`:role/$Role"
+		$Regex = "^(arn:aws(?:-us-gov|-cn)?:iam::)[0-9]{12}:.*$"
+		$Arn = ($Identity.Arn -replace $Regex, '$1') + "$AccountId`:role/$Role"
+
 		$RoleSessionName = "$($Identity.Arn.Substring($Identity.Arn.LastIndexOf("/") + 1))_$AccountId"
 
 		[System.Collections.Hashtable]$RoleSplat = @{}
@@ -6038,7 +6175,7 @@ Function Invoke-AWSCrossAccountCommand {
 			[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
 			$Regex = "^(arn:aws(?:-us-gov|-cn)?:iam::[0-9]{12}:)user(\/.*)$"
 
-            $TokenSerialNumber = $Arn -replace $Regex, '$1mfa$2'			
+            $TokenSerialNumber = $Identity.Arn -replace $Regex, '$1mfa$2'			
 		}
 
         [System.Collections.Hashtable]$TokenSplat = @{}
@@ -6054,13 +6191,32 @@ Function Invoke-AWSCrossAccountCommand {
             $TokenSplat.Add("TokenCode", $TokenCode)
         }
 
-		$RemoteCredentials = Use-STSRole -RoleArn $Arn -RoleSessionName $RoleSessionName -DurationInSeconds $DurationInSeconds @RoleSplat @SourceSplat @TokenSplat
+		Write-Verbose -Message "Assuming role $Arn with session name $RoleSessionName."
 
-		Set-AWSCredential -Credential $RemoteCredentials.Credentials
+		[Amazon.SecurityToken.Model.AssumeRoleResponse]$RemoteCredentials = Use-STSRole -RoleArn $Arn -RoleSessionName $RoleSessionName -DurationInSeconds $DurationInSeconds @RoleSplat @SourceSplat @TokenSplat
 
-		& $ScriptBlock
+		try
+		{
+			if ($PSCmdlet.ParameterSetName -ilike "*-SB")
+			{
+				# Add the set-awscredential to the script block since the executed script block doesn't respect the credentials set in this ps host
+				Write-Verbose -Message "Running scriptblock."
+				$ScriptBlock = [System.Management.Automation.ScriptBlock]::Create("Set-AWSCredential -AccessKey $($RemoteCredentials.Credentials.AccessKeyId) -SecretKey $($RemoteCredentials.Credentials.SecretAccessKey) -SessionToken $($RemoteCredentials.Credentials.SessionToken)`n$ScriptBlock")
+				
+				& $ScriptBlock
+			}
+			else
+			{
+				Set-AWSCredential -Credential $RemoteCredentials.Credentials
+				Write-Verbose -Message "Running script path."
 
-		Clear-AWSCredential
+				& $FilePath
+			}
+		}
+		finally 
+		{
+			Clear-AWSCredential
+		}
 	}
 
 	End {
@@ -6069,7 +6225,79 @@ Function Invoke-AWSCrossAccountCommand {
 
 Function Get-AWSSupportCaseList {
 	<#
+		.SYNOPSIS
+			Retrieves a list AWS support cases that can be easily converted to CSV or JSON
 
+		.DESCRIPTION
+			The cmdlet retrieves a list of AWS support cases and flattens the complex objects (communication and attachments) into 
+			strings to make conversion into CSV or JSON straight forward.
+
+		.PARAMETER BatchSize
+			The number of cases to retrieve at one time. This is also used as the batch size for the amount of client communication entries to 
+			retrieve.
+
+		.PARAMETER AfterTime
+			The time after which to retrieve support cases based on their start date.
+
+		.PARAMETER BeforeTime
+			The time before which to retrieve support cases based on their start date. Support cases are only available for the past 12 months.
+
+		.PARAMETER IncludeResolvedCases
+			Cases that have been resolved will be included in the results.
+
+		.PARAMETER IncludeAllCommunication
+			In the case that the support case has more than 5 client communication entries, specifying this will include all client communication
+			for that case, otherwise, only up to 5 entries are included.
+
+		.PARAMETER CaseIdList
+			Supply up to 100 case Ids to retrieve details on instead of retrieving all cases.
+
+		.PARAMETER Language
+			Filter the cases based on the specified language, like 'en-us'.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$Cases = Get-AWSSupportCaseList -IncludeResolvedCases -IncludeAllCommunication
+			$Cases | Export-Csv -NoTypeInformation -Path C:\users\administrator\Desktop\cases.csv
+
+			This example retrieves a list of all AWS support cases and includes all client communication. The $Cases variable is a list of PSCustomObjects. The
+			retrieved cases are piped to Export-Csv where they are saved in a CSV report.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 12/18/2017
 	#>
 	[CmdletBinding()]
 	[OutputType([System.Management.Automation.PSCustomObject[]])]
@@ -6140,7 +6368,6 @@ Function Get-AWSSupportCaseList {
         }
 
         [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		[System.Collections.Hashtable]$UtilSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
 
 		[System.Collections.Hashtable]$CaseSplat = @{}
 
@@ -6177,8 +6404,18 @@ Function Get-AWSSupportCaseList {
 				# The five most recent communications associated with the case.
                 [System.String[]]$Comms = $Case.RecentCommunications.Communications | 
                     Where-Object {$_ -ne $null -and $_.Length -gt 0} |
-					Select-Object -Property @{Name="comms";Expression={"$($_.TimeCreated) : $($_.Body)"}} | 
-					Select-Object -ExpandProperty comms
+					ForEach-Object {
+						$Comm = "Timestamp: $($_.TimeCreated)`r`nAttachments: "
+
+						if ($_.AttachmentSet.Length -gt 0)
+						{
+							$Comm += [System.String]::Join(",", ($_.AttachmentSet | Select-Object -Property @{Name = "Att"; Expression = { "{Id : $($_.AttachmentId); FileName : $($_.FileName)}" }} | Select-Object -ExpandProperty Att))
+						}
+
+						$Comm += "`r`nBody:`r`n`r`n$($_.Body)"
+
+						Write-Output -InputObject $Comm
+					}
 
 				# No recent communications
                 if ($Comms -eq $null -or $Comms.Length -eq 0)
@@ -6208,8 +6445,18 @@ Function Get-AWSSupportCaseList {
 						[Amazon.AWSSupport.Model.Communication[]]$CommResults = Get-ASACommunication -CaseId $Case.CaseId -MaxResult $BatchSize -NextToken $CommNextToken @SourceSplat @CommSplat
 						$Comms += $CommResults |
 							Where-Object {$_ -ne $null -and $_.Length -gt 0} |
-							Select-Object -Property @{Name="comms";Expression={"$($_.TimeCreated) : $($_.Body)"}} | 
-							Select-Object -ExpandProperty comms
+							ForEach-Object {
+								$Comm = "Timestamp: $($_.TimeCreated)`r`nAttachments: "
+
+								if ($_.AttachmentSet.Length -gt 0)
+								{
+									$Comm += [System.String]::Join(",", ($_.AttachmentSet | Select-Object -Property @{Name = "Att"; Expression = { "{Id : $($_.AttachmentId); FileName : $($_.FileName)}" }} | Select-Object -ExpandProperty Att))
+								}
+
+								$Comm += "`r`nBody:`r`n`r`n$($_.Body)"
+
+								Write-Output -InputObject $Comm
+							}
 						
 						$CommNextToken = $AWSHistory.LastServiceResponse.NextToken
 
@@ -6232,7 +6479,7 @@ Function Get-AWSSupportCaseList {
                 $Results += ([PSCustomObject]@{
                     CaseId = $Case.CaseId
 					CategoryCode = $Case.CategoryCode
-					CcEmailAddresses = $Case.CcEmailAddresses
+					CcEmailAddresses = [System.String]::Join(",", $Case.CcEmailAddresses)
 					DisplayId = $Case.DisplayId
 					Language = $Case.Language
 					RecentCommunications = [System.String]::Join("`r`n`r`n", $Comms)
@@ -6250,5 +6497,460 @@ Function Get-AWSSupportCaseList {
 	}
 
 	End {
+	}
+}
+
+Function Get-AWSVpcPeeringSummary {
+	<#
+		.SYNOPSIS
+			Retrieves a summary of VPCs and their peering status in an AWS account.
+
+		.DESCRIPTION
+			The cmdlet retrieves the VPC peering status for each VPC in each specified region in an AWS account. If specific regions are not provided,
+			then every region is queried for its VPCs and peering connections.
+
+		.PARAMETER GovCloud
+			This specifies the provided credentials and regions (if any) are part of GovCloud. If the Regions parameter is not specified, all GovCloud
+			regions are used.
+
+		.PARAMETER China
+			This specifies the provided credentials and regions (if any) are part of China. If the Regions parameter is not specified, all China
+			regions are used.
+
+		.PARAMETER Regions
+			The regions to retrieve VPC information from. If this is not specified, all regions are used.
+
+		.PARAMETER OnlyIncludePeeredVpcs
+			Specifies that only VPCs with an active peering connection are included in the output.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+
+			Get-AWSVpcPeeringSummary -OnlyIncludePeeredVpcs -Regions @("us-west-1")
+			
+			Retrieves only the peered VPCs in the us-west-1 region.
+
+		.EXAMPLE
+
+			$VPCs = Get-AWSVpcPeeringSummary -ProfileName "my-aws-account"
+			$VPCs | Export-Csv -Path c:\vpcpeering.csv -NoTypeInformation
+
+			Retrieves information in all VPCs in all regions accessible to the credentials in the "my-aws-account" profile and writes out the details
+			to a CSV file.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 12/18/2017
+	#>
+	[CmdletBinding(DefaultParameterSetName = "Public")]
+	[OutputType([System.Management.Automation.PSCustomObject[]])]
+	Param(
+		[Parameter(ParameterSetName = "GovCloud")]
+		[Switch]$GovCloud,
+
+		[Parameter(ParameterSetName = "China")]
+		[Switch]$China,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[System.String[]]$Regions,
+
+		[Parameter()]
+		[Switch]$OnlyIncludePeeredVpcs,
+
+		[Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+
+	}
+
+	Process {
+		if (-not $PSBoundParameters.ContainsKey("Regions") -or $Regions.Length -eq 0)
+		{
+			switch ($PSCmdlet.ParameterSetName)
+			{
+				"Public" {
+					$Regions = $AWSPublicRegions
+					break
+				}
+				"China" {
+					$Regions = Get-AWSRegion -IncludeChina | Select-Object -ExpandProperty Region | Where-Object {$_ -ilike "cn-*"}
+					break
+				}
+				"GovCloud" {
+					$Regions = Get-AWSRegion -GovCloudOnly | Select-Object -ExpandProperty Region
+					break
+				}
+			}			
+		}
+
+		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		
+		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
+		$AccountId = $Identity.Account
+
+		[PSCustomObject[]]$Results = @()
+
+		# Remove the region parameter since we want to use the source splat across multiple regions
+		$SourceSplat.Remove("Region")
+
+		$i = 0
+
+		foreach ($IncludedRegion in $Regions)
+		{
+			$i++
+			$Percent = [System.Math]::Round(($i / $Regions.Length) * 100, 2)
+			Write-Progress -Activity "Processing Regions" -Id 1 -Status "Processing $i of $($Regions.Length) AWS Regions ($IncludedRegion), $Percent% Complete" -PercentComplete $Percent
+
+			try
+			{
+				[Amazon.EC2.Model.Vpc[]]$Vpcs = Get-EC2Vpc -Region $IncludedRegion @SourceSplat
+				[Amazon.EC2.Model.VpcPeeringConnection[]]$Peering = Get-EC2VpcPeeringConnections -Region $IncludedRegion @SourceSplat
+			
+				Write-Verbose -Message "Found $($Vpcs.Length) VPCs and $($Peering.Length) peering connections in $IncludedRegion for account $AccountId."
+
+				$j = 0
+
+				if ($Peering -ne $null -and $Peering.Length -gt 0)
+				{
+					foreach ($Vpc in $Vpcs)
+					{
+						$j++
+						$Percent2 = [System.Math]::Round(($j / $Vpcs.Length) * 100, 2)
+						Write-Progress -Activity "Processing VPCs" -Id 2 -ParentId 1 -Status "Processing $j of $($Vpcs.Length) VPCs in $IncludedRegion, $Percent2% Complete" -PercentComplete $Percent2
+
+						# Get the VPC Ids of peered VPCs where this VPC was the accepter
+						[System.String[]]$AccepterConnections = $Peering | 
+							Where-Object { ($_.AccepterVpcInfo | Select-Object -ExpandProperty VpcId).Contains($Vpc.VpcId) } | 
+							Select-Object -ExpandProperty RequesterVpcInfo | Select-Object -ExpandProperty VpcId
+					
+						# Get the VPC Ids of peered VPCs where this VPC was the requestor
+						[System.String[]]$RequesterConnections = $Peering | 
+							Where-Object { ($_.RequesterVpcInfo | Select-Object -ExpandProperty VpcId).Contains($Vpc.VpcId) } | 
+							Select-Object -ExpandProperty AccepterVpcInfo | Select-Object -ExpandProperty VpcId
+
+						$Peered = $AccepterConnections.Length -gt 0 -or $RequesterConnections.Length -gt 0
+
+						if (-not $OnlyIncludePeeredVpcs -or ($OnlyIncludePeeredVpcs -and $Peered))
+						{
+							$Results += [PSCustomObject]@{
+									VpcId = $Vpc.VpcId; 
+									CidrBlock = $Vpc.CidrBlock;
+									AccountId = $AccountId;
+									Region = $IncludedRegion;
+									Peered = $Peered;
+									RequesterVpc = if ($RequesterConnections.Length -gt 0) { [System.String]::Join("`r`n", $RequesterConnections) } else { "" };
+									AccepterVpc = if ($AccepterConnections.Length -gt 0) { [System.String]::Join("`r`n", $AccepterConnections) } else { "" };
+								}
+						}
+					}
+
+					Write-Progress -Activity "Processing VPCs" -ParentId 1 -Id 2 -Completed
+				}
+				elseif (-not $OnlyIncludePeeredVpcs)
+				{				
+					Write-Progress -Activity "Processing VPCs" -Status "Processing VPCs in $IncludedRegion" -ParentId 1 -Id 2
+
+					$Results += ($Vpcs | Select-Object -Property VpcId, 
+						CidrBlock, 
+						@{Name = "AccountId"; Expression = { $AccountId }}, 
+						@{Name = "Region"; Expression = { $IncludedRegion }}, 
+						@{Name = "Peered"; Expression = { $false }},
+						@{Name = "RequesterVpc"; Expression = { "" }},
+						@{Name = "AccepterVpc"; Expression = { "" }})
+
+					Write-Progress -Activity "Processing VPCs" -ParentId 1 -Id 2 -Completed
+				}
+			}
+			catch [System.InvalidOperationException]
+			{
+				if ($_.Exception.InnerException -ne $null -and 
+					$_.Exception.InnerException.InnerException -ne $null -and
+					$_.Exception.InnerException.InnerException -is [System.Net.WebException])
+				{
+					if ($ErrorActionPreference -ne [System.Management.Automation.ActionPreference]::Stop)
+					{
+						# If you can't contact a specific region, this doesn't need to terminate
+						Write-Warning -Message "$IncludedRegion`: $($_.Exception.InnerException.Message)"
+					}
+					else
+					{
+						throw $_.Exception
+					}
+				}
+				else
+				{
+					throw $_.Exception
+				}
+			}
+		}
+
+		Write-Progress -Activity "Processing Regions" -Completed
+
+		Write-Output -InputObject $Results
+	}
+
+	End {
+
+	}
+}
+
+Function Get-AWSIAMRoleSummary {
+	<#
+		.SYNOPSIS
+			Retrieves a summary about the specified role(s) or all roles in an account.
+
+		.DESCRIPTION
+			This cmdlet retrieves details about specified roles or all roles in an account. The details include all inline and managed policy documents,
+			the assume role policy document, name, arn, created date, path, etc. If a specified role is not found, the cmdlet produces a warning, but
+			can throw an exception if the -ErrorAction parameter is set to stop.
+
+		.PARAMETER RoleNames
+			The name of a role or multiple roles to retrieve a summary of. If this parameter is not specified, all roles in the account are retrieved.
+
+		.PARAMETER PathPrefix
+			The path prefix for filtering the IAM roles processed. For example, the prefix /application_abc/component_xyz/ gets all roles whose path starts with /application_abc/component_xyz/.
+
+			If it is not included, it defaults to a slash (/), listing all roles.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE 
+			$IAMRoles = Get-AWSIAMRoleSummary -ProfileName "my-lab"
+
+			Gets a summary of all the IAM roles and their policies in the account specified by the my-lab credentials profile.
+
+		.EXAMPLE
+			Get-AWSIAMRoleSummary -PathPrefix /caa-roles/ -ProfileName "my-lab"
+
+			Gets a summary of the IAM roles and their policies in the /caa-roles/ path inside the account specified by the my-lab credentials profile.
+
+		.EXAMPLE 
+			Get-AWSIAMRoleSummary -RoleNames "PowerUserRole","AdministratorRole" -ProfileName "my-lab"
+
+			Gets a summary of the PowerUserRole and AdministratorRole IAM roles and their policies inside the account specified by the my-lab credentials profile.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 12/19/2017
+	#>
+	[CmdletBinding(DefaultParameterSetName = "Name")]
+	[OutputType([System.Management.Automation.PSCustomObject[]])]
+	Param(
+		[Parameter(ParameterSetName = "Name")]
+		[ValidateNotNullOrEmpty()]
+		[System.String[]]$RoleNames,
+
+		[Parameter(ParameterSetName = "Prefix")]
+		[ValidateNotNullOrEmpty()]
+		[ValidatePattern("(?:^\/$|(?:\/\S+\/)+)")]
+		[System.String]$PathPrefix = "/",
+
+		[Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		
+		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
+		$AccountId = $Identity.Account
+
+		[PSCustomObject[]]$AccountRoles = @()
+
+		if (-not $PSBoundParameters.ContainsKey("RoleNames") -or $RoleNames.Length -eq 0)
+		{
+			# Path prefix defaults to "/", which lists all roles
+			[Amazon.IdentityManagement.Model.Role[]]$RoleNames = Get-IAMRoleList -PathPrefix $PathPrefix @SourceSplat
+		}
+		
+		$i = 0
+
+		foreach ($IAMRole in $RoleNames)
+		{
+			$i++
+			$Percent = [System.Math]::Round(($i / $RoleNames.Length) * 100, 2)
+			Write-Progress -Activity "Processing Roles" -Status "Processing $i of $($RoleNames.Length) IAM Roles, $Percent% Complete" -PercentComplete $Percent
+
+			[System.String[]]$RolePolicies = @()
+
+			try
+			{
+				[System.String[]]$InlinePolicies = Get-IAMRolePolicyList -RoleName $IAMRole.RoleName @SourceSplat
+
+				foreach ($InlinePolicy in $InlinePolicies)
+				{
+					[Amazon.IdentityManagement.Model.GetRolePolicyResponse]$GetPolicyResult = Get-IAMRolePolicy -PolicyName $InlinePolicy -RoleName $IAMRole.RoleName @SourceSplat
+					$RolePolicies += "`"$($GetPolicyResult.PolicyName)`":$($GetPolicyResult.PolicyDocument)"
+				}
+
+				[Amazon.IdentityManagement.Model.AttachedPolicyType[]]$AttachedPolicies = Get-IAMAttachedRolePolicyList -RoleName $IAMRole.RoleName @SourceSplat
+
+				foreach ($AttachedPolicy in $AttachedPolicies)
+				{
+					[Amazon.IdentityManagement.Model.ManagedPolicy]$ManagedPolicy = Get-IAMPolicy -PolicyArn $AttachedPolicy.PolicyArn @SourceSplat
+					[Amazon.IdentityManagement.Model.PolicyVersion]$GetManagedPolicyResult = Get-IAMPolicyVersion -PolicyArn $ManagedPolicy.Arn -VersionId $ManagedPolicy.DefaultVersionId @SourceSplat
+					$RolePolicies += "`"$($ManagedPolicy.Arn)`":$($GetManagedPolicyResult.Document)"
+				}
+
+				$Policies = [System.Net.WebUtility]::UrlDecode([System.String]::Join(",", $RolePolicies))
+				$Policies = ConvertTo-Json -InputObject (ConvertFrom-Json -InputObject "{$Policies}") -Compress -Depth 10
+
+				$AccountRoles += [PSCustomObject]@{
+					RoleId = $IAMRole.RoleId;
+					RoleName = $IAMRole.RoleName;
+					Arn = $IAMRole.Arn;
+					AccountId = $AccountId;
+					CreateDate = $IAMRole.CreateDate;
+					Path = $IAMRole.Path;
+					AssumeRolePolicyDocument = ConvertTo-Json -InputObject (ConvertFrom-Json -InputObject ([System.Net.WebUtility]::UrlDecode($IAMRole.AssumeRolePolicyDocument))) -Compress -Depth 10
+					Policies = $Policies
+				}
+			}
+			catch [System.InvalidOperationException]
+			{
+				if ($_.Exception.InnerException -ne $null -and $_.Exception.InnerException -is [Amazon.IdentityManagement.Model.NoSuchEntityException])
+				{
+					if ($ErrorActionPreference -ne [System.Management.Automation.ActionPreference]::Stop)
+					{
+						Write-Warning -Message "$($_.Exception.InnerException.Message)"
+					}
+					else
+					{
+						throw $_.Exception
+					}
+				}
+				else
+				{
+					throw $_.Exception
+				}
+			}
+		}
+
+		Write-Progress -Activity "Processing Roles" -Completed
+
+		Write-Output -InputObject $AccountRoles
+	}
+
+	End {
+
 	}
 }
