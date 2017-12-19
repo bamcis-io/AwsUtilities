@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.4.1
+Updated dependencies in the manifest.
+
 ### 1.0.4.0
 Added cmdlets: Move-EC2Instance, Invoke-AWSTemporaryLogin, Invoke-AWSCrossAccountCommand, Get-AWSSupportCaseList, Get-AWSVpcPeeringSummary, and Get-AWSIAMRoleSummary.
 
