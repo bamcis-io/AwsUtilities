@@ -1,5 +1,16 @@
 # Aws Utilities
 
+## Usage
+
+### AWS CloudTrail Logs
+
+    $End = [System.DateTime]::Parse("7/1/2017 11:59:59 PM")
+    $Results = Get-AWSCloudTrailLogs -Bucket "ct-logging" -ProfileName myprofile -Start ([System.DateTime]::Parse("7/1/2017")) -End $End -APIs @("DescribeInstances")
+    $Grouping = $Results | Group-Object -Property { $_.Group.userIdentity.arn } -NoElement
+    $Grouping | FT -AutoSize
+
+This example retrieves the user identities that ran DescribeInstances on the date 7/1/2017. CloudTrail is configured to deliver logs to the bucket ct-logging.
+
 ## Revision History
 
 ### 1.0.4.1
