@@ -206,11 +206,11 @@ Function Get-EC2InstanceRegion {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 5/3/2017
+			LAST UPDATE: 1/14/2019
 	#>
 	[CmdletBinding()]
 	Param(
-		[Parameter(ValueFromPipeline = $true)]
+		[Parameter(ValueFromPipeline = $true, Position = 0)]
 		[ValidateNotNullOrEmpty()]
 		$ComputerName,
 
@@ -221,23 +221,31 @@ Function Get-EC2InstanceRegion {
 	)
 
 	Begin {
+        $HostIPs = @(".", "localhost", "", $env:COMPUTERNAME, "127.0.0.1")
+
+        if ((Get-Command -Name "Get-NetIPAddress") -ne $null)
+        {
+            $HostIPs += (Get-NetIPAddress | Select-Object -ExpandProperty IPAddress)
+        }
 	}
 
-	Process {		
-		if ($PSBoundParameters.ContainsKey("ComputerName") -and $ComputerName -inotin @(".", "localhost", "", $env:COMPUTERNAME, "127.0.0.1"))
-		{
-			[System.String]$Region = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-				[System.Net.WebClient]$WebClient = New-Object -TypeName System.Net.WebClient
-				Write-Output -InputObject (ConvertFrom-Json -InputObject ($WebClient.DownloadString("http://169.254.169.254/latest/dynamic/instance-identity/document"))).Region
-			} -Credential $Credential
-		}
-		else
-		{
-			[System.Net.WebClient]$WebClient = New-Object -TypeName System.Net.WebClient
-			[System.String]$Region = (ConvertFrom-Json -InputObject ($WebClient.DownloadString("http://169.254.169.254/latest/dynamic/instance-identity/document"))).Region
-		}
+	Process {	
+        $Splat = @{}
 
-		Write-Output -InputObject $Region
+        if ($Credential -ne [System.Management.Automation.PSCredential]::Empty)
+        {
+            $Splat.Add("Credential", $Credential)
+        }
+
+        if ($PSBoundParameters.ContainsKey("ComputerName") -and $ComputerName -inotin $HostIPs)
+        {
+            $Splat.Add("ComputerName", $ComputerName)
+        }
+	
+		Invoke-Command -ScriptBlock {
+			[Microsoft.PowerShell.Commands.WebResponseObject]$Response = Invoke-WebRequest -Uri http://169.254.169.254/latest/dynamic/instance-identity/document
+            ConvertFrom-Json -InputObject $Response.Content | Select-Object -ExpandProperty Region | Write-Output
+		} @Splat | Write-Output
 	}
 
 	End {
