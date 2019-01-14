@@ -8,6 +8,7 @@ $script:INTEL_DRIVER = "Intel82599VF"
 $script:ENA = "ENA"
 $script:FederationUrl = "https://signin.aws.amazon.com/federation"
 $script:IPRangeUrl = "https://ip-ranges.amazonaws.com/ip-ranges.json"
+$script:MaxEC2Tags = 50
 
 #Make the variable $AWSRegions available to all of the cmdlets
 Set-Variable -Name AWSRegions -Value (Get-AWSRegion -IncludeChina -IncludeGovCloud | Select-Object -ExpandProperty Region)
@@ -279,13 +280,13 @@ Function Get-EC2InstanceId {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 5/3/2017
+			LAST UPDATE: 1/14/2019
 	#>
 	[CmdletBinding()]
 	Param(
-		[Parameter(ValueFromPipeline = $true)]
+		[Parameter(ValueFromPipeline = $true, Position = 0)]
 		[ValidateNotNullOrEmpty()]
-		[System.String]$ComputerName,
+		$ComputerName,
 
 		[Parameter()]
 		[ValidateNotNull()]
@@ -294,23 +295,236 @@ Function Get-EC2InstanceId {
 	)
 
 	Begin {
+        $HostIPs = @(".", "localhost", "", $env:COMPUTERNAME, "127.0.0.1")
+
+        if ((Get-Command -Name "Get-NetIPAddress") -ne $null)
+        {
+            $HostIPs += (Get-NetIPAddress | Select-Object -ExpandProperty IPAddress)
+        }
 	}
 
-	Process {		
-		if ($PSBoundParameters.ContainsKey("ComputerName") -and $ComputerName -inotin @(".", "localhost", "", $env:COMPUTERNAME, "127.0.0.1"))
-		{
-			[System.String]$Id = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-				[System.Net.WebClient]$WebClient = New-Object -TypeName System.Net.WebClient
-				Write-Output -InputObject $WebClient.DownloadString("http://169.254.169.254/latest/meta-data/instance-id")
-			} -Credential $Credential
-		}
-		else
-		{
-			[System.Net.WebClient]$WebClient = New-Object -TypeName System.Net.WebClient
-			[System.String]$Id = $WebClient.DownloadString("http://169.254.169.254/latest/meta-data/instance-id")
-		}
+	Process {	
+        $Splat = @{}
 
-		Write-Output -InputObject $Id
+        if ($Credential -ne [System.Management.Automation.PSCredential]::Empty)
+        {
+            $Splat.Add("Credential", $Credential)
+        }
+
+        if ($PSBoundParameters.ContainsKey("ComputerName") -and $ComputerName -inotin $HostIPs)
+        {
+            $Splat.Add("ComputerName", $ComputerName)
+        }
+	
+		Invoke-Command -ScriptBlock {
+			[Microsoft.PowerShell.Commands.WebResponseObject]$Response = Invoke-WebRequest -Uri http://169.254.169.254/latest/meta-data/instance-id
+            $Response.Content | Write-Output
+		} @Splat | Write-Output
+	}
+
+	End {
+	}
+}
+
+Function Get-AWSAccountId {
+	<#
+		.SYNOPSIS
+			Gets the AWS account Id associated with the current or specified credentials.
+
+		.DESCRIPTION
+			The cmdlet gets the caller identity from STS and returns the AWS Account Id.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+
+        .EXAMPLE
+			$Id = Get-AWSAccountId
+
+			Gets the account id of the current credentials.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.String
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/14/2019
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {	
+        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+        [Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Response = Get-STSCallerIdentity @Splat 
+        Write-Output -InputObject $Response.Account
+	}
+
+	End {
+	}
+}
+
+Function Get-AWSIAMPrincipalId {
+	<#
+		.SYNOPSIS
+			Gets the AWS IAM principal Id associated with the current or specified credentials.
+
+		.DESCRIPTION
+			The cmdlet gets the caller identity from STS and returns the IAM principal id.
+
+            PRINCIPAL             -   aws:userid
+            AWS Account           -   Account ID
+            IAM User              -   Unique ID
+            Federated User        -   account:caller-specified-name
+            Web Federated User    -   role-id:caller-specified-role-name
+            SAML Federated User   -   role-id:caller-specified-role-name
+            Assumed Role          -   role-id:caller-specified-role-name
+            EC2 Instance Profilee -   role-id:ec2-instance-id
+
+            The "role-id" is a unique identifier assigned to each role at creation.
+
+            The "caller-specified-name" and "caller-specified-role-name" are names passed by the calling process when it makes a call to get temporary credentials.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+
+        .EXAMPLE
+			$Id = Get-AWSIAMPrincipalId
+
+			Gets the user id of the current credentials.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.String
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/14/2019
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {	
+        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+        [Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Response = Get-STSCallerIdentity @Splat 
+        Write-Output -InputObject $Response.UserId
 	}
 
 	End {
@@ -367,6 +581,33 @@ Function New-EBSAutomatedSnapshot {
 		.PARAMETER EnableLogging
 			Enables writing a log file to c:\AwsLogs\EBS\Backup.log with the transcript of the backup job. The log file is automatically rolled over when it exceeds 5MB.
 
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
 		.EXAMPLE
 			New-AutomatedEBSSnapshot -RetentionPeriod (New-TimeSpan -Days 45)
 
@@ -389,14 +630,79 @@ Function New-EBSAutomatedSnapshot {
 		[System.TimeSpan]$RetentionPeriod = (New-TimeSpan -Days 30),
 
 		[Parameter(ParameterSetName = "DoNotDelete")]
-		[switch]$DoNotDelete,
+		[Switch]$DoNotDelete,
 
 		[Parameter()]
-		[switch]$EnableLogging
+		[Switch]$EnableLogging,
+
+		[Parameter()]
+		[Switch]$PropogateTags,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
 	)
 
 	Begin {	
 		Function Write-EBSLog {
+			<#
+				.SYNOPSIS
+					Writes to a log file about the EBS snapshot activity.
+
+				.DESCRIPTION
+					Writes to a log file about the EBS snapshot activity. When a log file is rolled after passing 5MB, the current datetime stamp is appended to the file.
+
+				.PARAMETER Message
+					The message to write.
+
+				.PARAMETER Level
+					The log level, INFO, WARNING, or ERROR.
+
+				.PARAMETER Path
+					The path to the log file. This defaults to $env:ProgramData\aws\ebs\backup.log
+
+				.PARAMETER NoTimeStamp
+					Specifies that the log entry is written without a timestamp.
+
+				.EXAMPLE
+					Write-EBSLog -Message "Beginning volume snapshot creation job."	
+
+					Writes the message to the default log file.
+
+				.INPUTS
+					None
+
+				.OUTPUTS
+					None
+
+				.NOTES
+					AUTHOR: Michael Haken
+					LAST UPDATE: 1/14/2019
+			#>
 			Param(
 				[Parameter(Mandatory = $true)]
 				[ValidateNotNullOrEmpty()]
@@ -407,7 +713,7 @@ Function New-EBSAutomatedSnapshot {
 				[System.String]$Level = "INFO",
 
 				[Parameter()]
-				[System.String]$Path = "$env:SystemDrive\AwsLogs\EBS\Backup.log",
+				[System.String]$Path = "$env:ProgramData\aws\ebs\backup.log",
 
 				[Parameter()]
 				[switch]$NoTimeStamp
@@ -424,25 +730,21 @@ Function New-EBSAutomatedSnapshot {
 					New-Item -ItemType Directory -Path $Info.Directory.FullName
 				}
 
-				if (Test-Path -Path $Path)
+				if ($Info.Exists)
 				{
-					$Log = Get-Item -Path $LogFile
-
-					if ($Log.Length -gt 5MB)
+					# Rollover the log file
+					if ($Info.Length -gt 5MB)
 					{
-						$LogDate = (Get-Date).ToString("dd-MMM-yyyy_HH-mm-ss")
-						$Parts = $Log.Name.Split(".")
-						$NewName = $Parts[0] + "_" + $LogDate + "." + $Parts[1]
+						$Name = [System.IO.Path]::GetFileNameWithoutExtension($Info.FullName) 
 
-						while ((Get-Item -Path "$($Info.Directory.FullName)\$NewName" -ErrorAction SilentlyContinue) -ne $null) 
+						do
 						{
 							$LogDate = (Get-Date).ToString("dd-MMM-yyyy_HH-mm-ss")
-							$NewName = $Parts[0] + "_" + $LogDate + "." + $Parts[1]
-						}
+							$NewName = $Name + "_" + $LogDate + $Info.Extension
 
-						Rename-Item -Path $LogFile -NewName $NewName
+						} while (Test-Path -Path "$($Info.Directory.FullName)\$NewName")
 
-						$Path = "$($Info.Directory.FullName)\$NewName"
+						Rename-Item -Path $Info.FullName -NewName $NewName
 					}
 				}
 
@@ -451,7 +753,7 @@ Function New-EBSAutomatedSnapshot {
 					$Message = "$(Get-Date) [$Level] : $Message"
 				}
 
-				Add-Content -Path $Path -Value $Message
+				Add-Content -Path $Info.FullName -Value $Message
 			}
 
 			End {
@@ -460,6 +762,8 @@ Function New-EBSAutomatedSnapshot {
 	}
 
 	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation
+		[System.Collections.Hashtable]$AWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
 
 		if ($EnableLogging) 
 		{
@@ -485,9 +789,9 @@ Function New-EBSAutomatedSnapshot {
 				Write-EBSLog -Message "Getting instances."
 			}
 
-			#This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
-            #so save the error output and don't strongly type it
-            $Instances = Get-EC2Instance -InstanceId $SourceInstanceId -ErrorAction SilentlyContinue
+			# This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
+            # so save the error output and don't strongly type it
+            $Instances = Get-EC2Instance -InstanceId $SourceInstanceId -ErrorAction SilentlyContinue @Splat
 
             if ($Instances -ne $null)
             {
@@ -505,7 +809,9 @@ Function New-EBSAutomatedSnapshot {
 						}
 
 						$Date = (Get-Date).ToString("dd-MMM-yyyy_HH-mm-ss")
-						[Amazon.EC2.Model.Volume[]]$Volumes = Get-EC2Volume -Filter (New-Object -TypeName Amazon.EC2.Model.Filter -Property @{Name = "attachment.instance-id"; Value = $InstanceId})
+
+						# Get the volumes attached to this instance, when MaxResults is not specified, all results are returned
+						[Amazon.EC2.Model.Volume[]]$Volumes = Get-EC2Volume -Filter (New-Object -TypeName Amazon.EC2.Model.Filter -Property @{Name = "attachment.instance-id"; Value = $InstanceId}) @Splat
 
 						foreach ($Volume in $Volumes)
 						{
@@ -524,11 +830,32 @@ Function New-EBSAutomatedSnapshot {
 								}
 
 								[System.String]$VolumeSnapshotName = "$InstanceId`_$VolumeName`_$Date"
+								[Amazon.EC2.Model.TagSpecification]$Tags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
+								$Tags.ResourceType = [Amazon.EC2.ResourceType]::Snapshot
 
-								[Amazon.EC2.Model.Snapshot]$Snapshot = New-EC2Snapshot -VolumeId $Volume.VolumeId -Description "Automated backup created for $InstanceId on $Date" -Force
-						
-								New-EC2Tag -Resources @($Snapshot.SnapshotId) -Tags @(@{Key = "Source"; Value = $InstanceId}, @{Key="Name"; Value=$VolumeSnapshotName}, @{Key=$script:CREATED_BY; Value=$script:UNIQUE_ID}, @{Key=$script:CAN_BE_DELETED; Value=(-not [System.Bool]$DoNotDelete)})
+								if ($PropogateTags)
+								{
+									$Tags.Tags.AddRange($Volume.Tags)
+								}
 
+								$Tags.Tags.Add((New-Object -TypeName Amazon.EC2.Model.Tag("InstanceId", $InstanceId)))
+								$Tags.Tags.Add((New-Object -TypeName Amazon.EC2.Model.Tag("VolumeId", $Volume.VolumeId)))
+								$Tags.Tags.Add((New-Object -TypeName Amazon.EC2.Model.Tag("Name", $VolumeSnapshotName)))
+								$Tags.Tags.Add((New-Object -TypeName Amazon.EC2.Model.Tag($script:CREATED_BY, $script:UNIQUE_ID)))
+								$Tags.Tags.Add((New-Object -TypeName Amazon.EC2.Model.Tag($script:CAN_BE_DELETED, (-not [System.Boolean]$DoNotDelete))))
+
+								if (-not $DoNotDelete)
+								{
+									$Tags.Tags.Add((New-Object -TypeName Amazon.EC2.Model.Tag("DeleteAfter", [System.DateTime]::UtcNow.Add($RetentionPeriod).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"))))
+								}
+
+								if ($Tags.Tags.Count -gt $script:MaxEC2Tags)
+								{
+									throw "The snapshot creation for $($Volume.VolumeId) cannot succeed because the number of tags is greater than $($script:MaxEC2Tags)."
+								}
+
+								[Amazon.EC2.Model.Snapshot]$Snapshot = New-EC2Snapshot -VolumeId $Volume.VolumeId -Description "Automated backup created for $InstanceId on $Date" -Force -TagSpecification $Tags @Splat
+				
 								if ($EnableLogging) 
 								{
 									Write-EBSLog -Message "Finished snapshot for Volume $VolumeName - $($Volume.VolumeId)"
@@ -541,18 +868,50 @@ Function New-EBSAutomatedSnapshot {
 										Write-EBSLog -Message "Selected retention period: $RetentionPeriod" 
 									}
 
-									#Get snapshots that were created from the current volume, but are not the snapshot we just took
-									[Amazon.EC2.Model.Snapshot[]]$OldSnapshots = Get-EC2Snapshot -Filter (New-Object -TypeName Amazon.EC2.Model.Filter -Property @{Name = "volume-id"; Values = $Volume.VolumeId}) | Where-Object {$_.SnapshotId -ne $Snapshot.SnapshotId}
+									# Get snapshots that were created from the current volume, but are not the snapshot we just took, use pagination in case there are a lot
+									[Amazon.EC2.Model.Snapshot[]]$OldSnapshots = @()
+									$NextToken = $null
+									$AccountId = Get-AWSAccountId @AWSUtilitiesSplat
+									
+									do
+									{
+										$OldSnapshots += Get-EC2Snapshot `
+											-OwnerId $AccountId `
+											-Filter (New-Object -TypeName Amazon.EC2.Model.Filter -Property @{Name = "volume-id"; Values = $Volume.VolumeId}) `
+											-MaxResult 1000 `
+											-NextToken $NextToken `
+											@Splat | Where-Object {$_.SnapshotId -ne $Snapshot.SnapshotId}
+
+										[Amazon.EC2.Model.DescribeSnapshotsResponse]$Response =  $AWSHistory | Select-Object -ExpandProperty LastServiceResponse
+										$NextToken = $Response.NextToken
             
+									} while (-not [System.String]::IsNullOrEmpty($NextToken))
+
 									foreach ($OldSnapshot in $OldSnapshots)
 									{
 										[System.String]$CreatedBy = $OldSnapshot.Tags | Where-Object {$_.Key -eq $script:CREATED_BY} | Select-Object -ExpandProperty Value
 										[System.Boolean]$CanDelete = $OldSnapshot.Tags | Where-Object {$_.Key -eq $script:CAN_BE_DELETED} | Select-Object -ExpandProperty Value
-										[System.DateTime]$CreatedDate = $Re
+										
+										if (($OldSnapshot.Tags | Select-Object -ExpandProperty Key) -icontains "DeleteAfter")
+										{
+											try
+											{
+												[System.DateTime]$DeleteAfter = $OldSnapshot.Tags | Where-Object {$_.Key -eq "DeleteAfter"} | Select-Object -ExpandProperty Value
+											}
+											catch [Exception]
+											{
+												Write-EBSLog -Message "Could not parse DeleteAfter tag value: $($_.Exception.Message)"
+												[System.DateTime]$DeleteAfter = [System.DateTime]::MaxValue
+											}
+										}
+										else
+										{
+											[System.DateTime]$DeleteAfter = [System.DateTime]::MaxValue
+										}
 
 										if (($CreatedBy -ne $null -and $CreatedBy -eq $script:UNIQUE_ID) -and `
 											($CanDelete -ne $null -and $CanDelete -eq $true) -and `
-											$OldSnapshot.StartTime.ToUniversalTime().Add($RetentionPeriod) -lt [System.DateTime]::UtcNow
+											[System.DateTime]::UtcNow -ge $DeleteAfter										
 										)
 										{
 											try   
@@ -567,7 +926,7 @@ Function New-EBSAutomatedSnapshot {
 												}
                                         
 												#Returns no output
-												Remove-EC2Snapshot -SnapshotId $OldSnapshot.SnapshotId -Force
+												Remove-EC2Snapshot -SnapshotId $OldSnapshot.SnapshotId -Force @Splat
                                         
 												if ($EnableLogging) 
 												{ 
@@ -625,7 +984,7 @@ Function New-EBSAutomatedSnapshot {
             }
             else
             {
-				#This will get caught below
+				# This will get caught below
                 throw "Nothing was returned by the get instance request."
             }
 		}
@@ -650,7 +1009,7 @@ Function New-EBSAutomatedSnapshot {
 	}
 }
 
-Function Get-AWSProductInformation {
+Function Get-AWSPriceListProductInformation {
 	<#
 		.SYNOPSIS
 			This cmdlet evaluates the data in the AWS Price List API json and returns information about products that match the search criteria.
@@ -677,24 +1036,34 @@ Function Get-AWSProductInformation {
 			Gets matching RDS skus for the attributes specified
 
 		.EXAMPLE
-			Get-AWSProductInformation -Url https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonRDS/current/index.json -Attributes @{"location" = "US East (N. Virginia)"; "instanceType" = "db.m4.large"; "databaseEngine" = "PostgreSQL"}
+			Get-AWSPriceListProductInformation -Url https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonRDS/current/index.json -Attributes @{"location" = "US East (N. Virginia)"; "instanceType" = "db.m4.large"; "databaseEngine" = "PostgreSQL"}
 
 			Gets matching RDS skus for the attributes specified
 
+		.EXAMPLE
+			Get-AWSPriceListProductInformation -Product AmazonEC2 -Attributes @{"location" = "US East (N. Virginia)"; "instanceType" = "m4.large"}
+
+			Gets matching EC2 skus for the attributes specified
+
+		.EXAMPLE
+			Get-AWSPriceListProductInformation -Path index.json -Attributes @{"location" = "US East (N. Virginia)"; "instanceType" = "m4.large"}
+	
+			Gets matching EC2 skus for the attributes specified
+
 		.INPUTS
-			System.String
+			None
 
 		.OUTPUTS
 			System.Management.Automation.PSCustomObject
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 4/27/2107
+			LAST UPDATE: 1/14/2019
 
 	#>
 	[CmdletBinding(DefaultParameterSetName = "Path")]
 	Param(
-		[Parameter(Mandatory=$true, ParameterSetName = "Path", Position = 0, ValueFromPipeline = $true)]
+		[Parameter(Mandatory = $true, ParameterSetName = "Path")]
 		[ValidateScript({Test-Path $_})]
 		[System.String]$Path,
 
@@ -727,7 +1096,6 @@ Function Get-AWSProductInformation {
 		$UrlAttributes.ValueFromPipeline = $true
         $UrlAttributes.Mandatory = $true
 		$UrlAttributes.ParameterSetName = "Url"
-		$UrlAttributes.Position = 0
 
 		[System.Collections.ObjectModel.Collection[System.Attribute]]$UrlAttributeCollection = New-Object -TypeName System.Collections.ObjectModel.Collection[System.Attribute]
         $UrlAttributeCollection.Add($UrlAttributes)
@@ -742,7 +1110,6 @@ Function Get-AWSProductInformation {
 		$ProductAttributes.ValueFromPipeline = $true
         $ProductAttributes.Mandatory = $true
 		$ProductAttributes.ParameterSetName = "Product"
-		$ProductAttributes.Position = 0
 
 		[System.Collections.ObjectModel.Collection[System.Attribute]]$ProductAttributeCollection = New-Object -TypeName System.Collections.ObjectModel.Collection[System.Attribute]
         $ProductAttributeCollection.Add($ProductAttributes)
@@ -802,11 +1169,11 @@ Function Get-AWSProductInformation {
 
 		[PSCustomObject[]]$private:Results = @()
 
-		#Expanding the products property gets us a single object with members like
-		#RBW79EQZWRSDB85D : @{sku=RBW79EQZWRSDB85D; productFamily=Database Instance; attributes=}
-		#W3PUKFKG7RDK3KA5 : @{sku=W3PUKFKG7RDK3KA5; productFamily=Data Transfer; attributes=}
+		# Expanding the products property gets us a single object with members like
+		# RBW79EQZWRSDB85D : @{sku=RBW79EQZWRSDB85D; productFamily=Database Instance; attributes=}
+		# W3PUKFKG7RDK3KA5 : @{sku=W3PUKFKG7RDK3KA5; productFamily=Data Transfer; attributes=}
 		
-		#We want to expand the property of the products object for each sku to access the hash table that has the data
+		# We want to expand the property of the products object for each sku to access the hash table that has the data
 		<#
 			Products will look like
 			8W42JWEZE64YAUET : @{sku=8W42JWEZE64YAUET; productFamily=Cache Instance; attributes=}
@@ -814,31 +1181,31 @@ Function Get-AWSProductInformation {
 		#>
 		[PSCustomObject]$private:Products = $private:ConvertedResponse | Select-Object -ExpandProperty products 
 
-		#Getting the members of Products will get us all of the sku properties, we want to iterate each
-		#one and select it, expanded from the products object, which will provide the hash table of data
-		#which includes sku, productFamily, and attributes
+		# Getting the members of Products will get us all of the sku properties, we want to iterate each
+		# one and select it, expanded from the products object, which will provide the hash table of data
+		# which includes sku, productFamily, and attributes
 		Get-Member -InputObject $private:Products -MemberType *Property | ForEach-Object {
 			
-            #The Get-Member results will have a name property, that is the sku data for each product
-			#By expanding the name property, we get the values of the sku index, which are the properties
-			#like attributes and productfamily
+            # The Get-Member results will have a name property, that is the sku data for each product
+			# By expanding the name property, we get the values of the sku index, which are the properties
+			# like attributes and productfamily
 			[PSCustomObject]$private:ProductData = $private:Products | Select-Object -ExpandProperty $_.Name
 
             [System.Collections.Hashtable]$private:TempHashTable = @{}
             
-            #Convert the PSCustomObject to a hash table
+            # Convert the PSCustomObject to a hash table
             $private:ProductData.attributes.psobject.Properties | ForEach-Object  {
                 $private:TempHashTable[$_.Name] = $_.Value
             }
 
-			#Assume the product matches the filters, and prove it false
+			# Assume the product matches the filters, and prove it false
 			$private:Matches = $true
 
-			#Now that we have product object, we can filter based on the key value pairs provided
+			# Now that we have product object, we can filter based on the key value pairs provided
 			foreach ($Key in $Attributes.Keys)
 			{
-                #If the hash table doesn't contain the key and the values are not alike, it doesn't match
-                #Otherwise, keep going
+                # If the hash table doesn't contain the key and the values are not alike, it doesn't match
+                # Otherwise, keep going
                 if (-not ($private:TempHashTable.ContainsKey($Key) -and $private:TempHashTable[$Key] -like $Attributes[$Key]))
                 {                    
                     $private:Matches = $false
