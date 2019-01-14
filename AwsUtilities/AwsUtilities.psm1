@@ -10,7 +10,7 @@ $script:FederationUrl = "https://signin.aws.amazon.com/federation"
 $script:IPRangeUrl = "https://ip-ranges.amazonaws.com/ip-ranges.json"
 
 #Make the variable $AWSRegions available to all of the cmdlets
-Set-Variable -Name AWSRegions -Value (@((Get-AWSRegion -GovCloudOnly | Select-Object -ExpandProperty Region), (Get-AWSRegion -IncludeChina | Select-Object -ExpandProperty Region)) | Select-Object -Unique)
+Set-Variable -Name AWSRegions -Value (Get-AWSRegion -IncludeChina -IncludeGovCloud | Select-Object -ExpandProperty Region)
 Set-Variable -Name AWSPublicRegions -Value @(Get-AWSRegion | Select-Object -ExpandProperty Region)
 
 Function Get-S3ETagCalculation {
@@ -21,16 +21,20 @@ Function Get-S3ETagCalculation {
 		.DESCRIPTION
 			The cmdlet calculates the hash of the targetted file to generate its S3 ETag value that can be used to validate file integrity.
 
-			This cmdlet will fail to work if FIPS Compliant algorithms are enforced because AWS uses an MD5 hash for the ETag.
+			This cmdlet will fail to work if FIPS Compliant algorithms are enforced because AWS uses an MD5 hash for the ETag. (Microsoft no longer recommends FIPS mode https://blogs.technet.microsoft.com/secguide/2014/04/07/why-were-not-recommending-fips-mode-anymore/)
 
 		.PARAMETER FilePath
 			The path to the file that is having its ETag value calculated.
 
-		.PARAMETER BlockSize
-			The size of each part uploaded to S3, defaults to 8MB.
+		.PARAMETER ChunkSize
+			The size of each part uploaded to S3, defaults to 8MB. Minimum size is 5MB, maximum size is 5GB (all files larger than 5GB are chunked).
 
-		.PARAMETER MinimumSize
-			The file must be larger than this size to use multipart upload, defaults to 64MB.
+			https://docs.aws.amazon.com/cli/latest/topic/s3-config.html#multipart-chunksize
+
+		.PARAMETER MultipartThreshold
+			The file must be larger than this size to use multipart upload, defaults to 64MB. Minimum value is 2 Bytes.
+
+			https://docs.aws.amazon.com/cli/latest/topic/s3-config.html#multipart-threshold
 
         .EXAMPLE
 			Get-S3ETagCalculation -FilePath "c:\test.txt"
@@ -45,10 +49,11 @@ Function Get-S3ETagCalculation {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 4/27/2017
+			LAST UPDATE: 1/14/2019
 	#>
 
 	[CmdletBinding()]
+	[OutputType([System.String])]
 	Param (
 		[Parameter(Position = 0, Mandatory = $true, ValueFromPipeline = $true)]
         [ValidateNotNullOrEmpty()]
@@ -59,82 +64,115 @@ Function Get-S3ETagCalculation {
 		[System.String]$FilePath,
 
 		[Parameter(Position = 1)]
-		[System.UInt64]$BlockSize = 8MB,
+		[ValidateRange(5MB, 5GB)]
+		[System.UInt64]$ChunkSize = 8MB,
 
 		[Parameter(Position = 2)]
-		[System.UInt64]$MinimumSize = 64MB
+		[ValidateRange(2, [System.UInt64]::MaxValue)]
+		[System.UInt64]$MultipartThreshold = 64MB
 	)
 
-	Begin {
+	Begin 
+	{
+		if ($env:OS -like "Windows*" -and (Test-Path -Path HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy))
+		{
+			$FIPS = Get-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy -Name Enabled -ErrorAction SilentlyContinue
+    
+			if ($?) # Will be true if previous command didn't error, which means the item property exists
+			{
+				if ((($FIPS | Get-Member -MemberType NoteProperty -Name "Enabled") -ne $null) -and $FIPS.Enabled -eq 1)
+				{
+					throw "FIPS Mode is currently enforced, and this cmdlet uses MD5 hash algorithms which are not allowed by FIPS enforced mode. Set DWORD `"Enabled`" in HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy to 0."
+				}
+				else
+				{
+					Write-Verbose -Message "FIPS enforced mode disabled."
+				}						
+			}			
+		}
 	}
 
-	Process {
-		#Track the number of parts that would need to be uploaded
+	Process 
+	{
+		# Track the number of parts that would need to be uploaded
 		$Parts = 0
 
-		#Track the hashes of each part in the array
+		# Track the hashes of each part in the array
 		[System.Byte[]]$BinaryHashArray = @()
 
-		#FIPS compliance enforcement must be turned off to use MD5
+		# FIPS compliance enforcement must be turned off to use MD5
 		[System.Security.Cryptography.MD5CryptoServiceProvider]$MD5 = [Security.Cryptography.HashAlgorithm]::Create([System.Security.Cryptography.MD5])
 
 		[System.IO.FileStream]$FileReader = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
 
-		#If the file is larger than the size to use multipart
-		if ($FileReader.Length -gt $MinimumSize) 
+		try
 		{
-            Write-Verbose -Message "The upload will use multipart"
+            Write-Verbose -Message "File at $FilePath is $($FileReader.Length) bytes long."
 
-			#Set the buffer object to the size of upload part
-			[System.Byte[]]$Buffer = New-Object -TypeName System.Byte[]($BlockSize)
+			# If the file is larger than the size to use multipart
+			if ($FileReader.Length -gt $MultipartThreshold) 
+			{
+				Write-Verbose -Message "The upload will use multipart"
 
-			#This reads the file and ensures we haven't reached the end of the file
-			#FileReader reads from 0 up to the buffer length and places it in the byte array
-			while (($LengthToRead = $FileReader.Read($Buffer,0,$Buffer.Length)) -ne 0)
-            {
-				#The number of parts in the upload is appended to the end of the ETag, so track that here
-				$Parts++
+				# Set the buffer object to the size of upload part
+				[System.Byte[]]$Buffer = New-Object -TypeName System.Byte[]($ChunkSize)
 
-				#Calculate the hash of the part and add it to a byte array
-				#ComputeHash takes in a byte array and returns one
-				#Only read in the amount of data that is left to be read
-				[System.Byte[]]$Temp = $MD5.ComputeHash($Buffer,0,$LengthToRead)
+				# This reads the file and ensures we haven't reached the end of the file
+				# FileReader reads from 0 up to the buffer length and places it in the byte array
+				while (($LengthToRead = $FileReader.Read($Buffer, 0, $Buffer.Length)) -ne 0)
+				{
+					# The number of parts in the upload is appended to the end of the ETag, so track that here
+					$Parts++
 
-                Write-Verbose -Message "Reading part $Parts : $([System.BitConverter]::ToString($Temp).Replace("-",[System.String]::Empty).ToLower())"
+					# Calculate the hash of the part and add it to a byte array
+					# ComputeHash takes in a byte array and returns one
+					# Only read in the amount of data that is left to be read
+					[System.Byte[]]$Temp = $MD5.ComputeHash($Buffer, 0, $LengthToRead)
 
-                $BinaryHashArray += $Temp
+					Write-Verbose -Message "Reading part $Parts : $([System.BitConverter]::ToString($Temp).Replace("-", [System.String]::Empty).ToLower())"
+
+					$BinaryHashArray += $Temp
+				}
+
+				Write-Verbose -Message "There are $Parts total parts."
+
+				# The MD5 hash is calculated by concatenating all of the MD5 hashes of the parts
+				# and then doing an MD5 hash of the concatenation
+				# Calculate the hash, ComputeHash() takes in a byte[]
+				Write-Verbose -Message "Calculating hash of concatenated hashes."
+				$BinaryHashArray = $MD5.ComputeHash($BinaryHashArray)
+			}
+			else # The file is not big enough to use multipart
+			{
+				Write-Verbose -Message "The upload is smaller than the minimum threshold and will not use multipart."
+
+				$Parts = 1
+				# Here ComputeHash takes in a Stream object
+				$BinaryHashArray = $MD5.ComputeHash($FileReader)
 			}
 
-            Write-Verbose -Message "There are $Parts total parts."
+			Write-Verbose -Message "Closing the file stream."
+			$FileReader.Close()
 
-            #The MD5 hash is calculated by concatenating all of the MD5 hashes of the parts
-            #and then doing an MD5 hash of the concatenation
-			#Calculate the hash, ComputeHash() takes in a byte[]
-            Write-Verbose -Message "Calculating hash of concatenated hashes."
-			$BinaryHashArray = $MD5.ComputeHash($BinaryHashArray)
+			# Convert the byte array to a string
+			[System.String]$Hash = [System.BitConverter]::ToString($BinaryHashArray).Replace("-","").ToLower()
+
+			# Append the number of parts to the ETag if there were multiple
+			if ($Parts -gt 1) 
+			{
+				$Hash += "-$Parts"
+			}
+
+			Write-Output -InputObject $Hash
 		}
-		else #The file is not big enough to use multipart
+		finally
 		{
-            Write-Verbose -Message "The upload is smaller than the minimum threshold and will not use multipart."
+			Write-Verbose -Message "Disposing MD5 Crypto Service Provider"
+			$MD5.Dispose()
 
-			$Parts = 1
-            #Here ComputeHash takes in a Stream object
-			$BinaryHashArray = $MD5.ComputeHash($FileReader)
+			Write-Verbose -Message "Disposing file reader"
+			$FileReader.Dispose()
 		}
-
-        Write-Verbose -Message "Closing the file stream."
-		$FileReader.Close()
-
-		#Convert the byte array to a string
-		[System.String]$Hash = [System.BitConverter]::ToString($BinaryHashArray).Replace("-","").ToLower()
-
-		#Append the number of parts to the ETag if there were multiple
-		if ($Parts -gt 1) 
-		{
-			$Hash += "-$Parts"
-		}
-
-		Write-Output -InputObject $Hash
 	}
 
 	End {
@@ -4605,8 +4643,35 @@ Function Get-AWSAmiMappings {
 			Gets the most current AMI image id for Windows and Amazon Linux instances in each region.
 
 		.DESCRIPTION
-			The cmdlet retrieves the most current AMI image id for Windows Server 2008 through Windows Server 2016 and Amazon Linux. The output is a	
+			The cmdlet retrieves the most current AMI image id for Windows Server 2012 through Windows Server 2019, Amazon Linux, and Amazon Linux 2. The output is a	
 			json formatted string that is targetted for usage in a Mappings section in an AWS Cloudformation script.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
 
 		.EXAMPLE
 			Get-AWSAmiMappings
@@ -4621,24 +4686,54 @@ Function Get-AWSAmiMappings {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 6/21/2017		
+			LAST UPDATE: 1/10/2019		
 	#>
     [CmdletBinding()]
-    Param()
+    Param(
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
 
     Begin {
         $OperatingSystems = @{
+			WindowsServer2019 = "Windows_Server-2019-English-Full-Base-*"
             WindowsServer2016 = "Windows_Server-2016-English-Full-Base-*"
             WindowsServer2012R2 = "Windows_Server-2012-R2_RTM-English-64Bit-Base-*"
             WindowsServer2012 = "Windows_Server-2012-RTM-English-64Bit-Base-*"
-            WindowsServer2008R2 = "Windows_Server-2008-R2_SP1-English-64Bit-Base-*"
-            WindowsServer2008 = "Windows_Server-2008-SP2-English-64Bit-Base-*"
-            AmazonLinux = "amzn-ami-hvm-*-gp2"
+            AmazonLinux = "amzn-ami-hvm-*-x86_64-gp2"
+			AmazonLinux2 = "amzn2-ami-hvm-*-x86_64-gp2"
         }
     }
 
     Process {
-        $Regions = Get-AWSRegion
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		
+        $Regions = Get-AWSRegion -IncludeGovCloud -IncludeChina @Splat
 
         [System.Collections.Hashtable]$Results = @{}
 
@@ -4655,7 +4750,7 @@ Function Get-AWSAmiMappings {
                 $Filter.Value = $_.Value
             
                 $Id = [System.String]::Empty
-                $Id = Get-EC2Image -Filter @($Filter) -Region $Region.Region -ErrorAction SilentlyContinue | Sort-Object -Property CreationDate -Descending | Select-Object -ExpandProperty ImageId -First 1
+                $Id = Get-EC2Image -Filter @($Filter) -Region $Region.Region -ErrorAction SilentlyContinue @Splat | Sort-Object -Property CreationDate -Descending | Select-Object -ExpandProperty ImageId -First 1
 
                 if (-not [System.String]::IsNullOrEmpty($Id))
                 {
@@ -6953,4 +7048,147 @@ Function Get-AWSIAMRoleSummary {
 	End {
 
 	}
+}
+
+Function Get-AWSVPCEndpointsByLocation {
+	<#
+		.PARAMETER CopyToClipboard
+			Copies the output to the clipboard as a JSON string.
+
+		.PARAMETER AsJson
+			Outputs as a JSON string instead of a PSCustomObject. Use this JSON as a Mapping element in CloudFormation to see if an endpoint service is available in a specific region or AZ.
+
+		.PARAMETER ByAvailabilityZone
+			This specifies which endpoints are available by AZ instead of by region.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+
+	#>
+    [CmdletBinding()]
+    Param(
+        [Parameter()]
+        [Switch]$CopyToClipboard,
+
+        [Parameter()]
+        [Switch]$AsJson,
+
+        [Parameter()]
+        [Switch]$ByAvailabilityZone,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+    )
+
+    Begin {
+    }
+
+    Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		
+        $Mapping =  [PSCustomObject]@{}
+
+        Get-AWSRegion -IncludeChina -IncludeGovCloud @Splat | Select-Object -ExpandProperty Region | ForEach-Object {
+            $Region = $_
+
+            Write-Verbose -Message "Processing region: $Region"
+        
+            if ($ByAvailabilityZone)
+            {
+                Get-EC2AvailabilityZone -Region $Region @Splat | Select-Object -ExpandProperty ZoneName | ForEach-Object {
+                    $Zone = $_
+                    $Mapping | Add-Member -Name $Zone -Value ([PSCustomObject]@{}) -MemberType NoteProperty
+                }
+            }
+            else
+            {
+                $Mapping | Add-Member -Name $Region -Value ([PSCustomObject]@{}) -MemberType NoteProperty
+            }
+        
+            Get-EC2VpcEndpointService -Region $Region @Splat | Select-Object -ExpandProperty ServiceDetails | ForEach-Object {
+                [Amazon.EC2.Model.ServiceDetail]$Detail = $_
+
+                $Name = $Detail.ServiceName.Substring($Detail.ServiceName.IndexOf($Region) + $Region.Length).Replace(".", "").Replace("-", "")
+                
+                if ($ByAvailabilityZone)
+                {
+                    Get-EC2AvailabilityZone -Region $Region @Splat | Select-Object -ExpandProperty ZoneName | ForEach-Object {                  
+                        $Zone = $_
+                        $Mapping.$Zone | Add-Member -Name $Name -Value ($Detail.AvailabilityZones -contains $Zone) -MemberType NoteProperty
+                    }
+                }
+                else
+                {
+                    $Mapping.$Region | Add-Member -Name $Name -Value 
+                }
+            }           
+        }
+
+        if ($AsJson)
+        {
+            $Json = $Mapping | ConvertTo-Json
+            Write-Output -InputObject $Json          
+
+            if ($CopyToClipboard)
+            {
+                $Json | Set-Clipboard
+            }
+        }
+        else
+        {
+            Write-Output -InputObject $Mapping
+
+            if ($CopyToClipboard)
+            {
+                $Json = $Mapping | ConvertTo-Json
+                $Json | Set-Clipboard
+            }
+        }
+    }
+
+    End {
+    }
 }
