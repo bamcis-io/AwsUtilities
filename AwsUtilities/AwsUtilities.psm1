@@ -1226,309 +1226,6 @@ Function Get-AWSPriceListProductInformation {
 	}
 }
 
-Function New-CloudFrontSignedUrl {
-	<#
-		.SYNOPSIS
-			Creates a signed cloudfront url. 
-	
-		.DESCRIPTION
-			This cmdlet is mostly for educational purposes, AWS provides a cmdlet that does exactly this, but it is
-			written in C# as part of the AWS PowerShell module. It uses the same approach of using BouncyCastle to
-			translate the PEM content into a usable RSA key.
-
-		.PARAMETER PemFileLocation
-			The location on disk of the private key to use. This should be a base64 pem file.
-
-		.PARAMETER PEM
-			This is the base64 encoded private key including the header and footer data, such as -----BEGIN RSA PRIVATE KEY-----. The PEM content must include this to be recognized.
-
-		.PARAMETER CloudfrontUrl
-			The url to sign.
-
-		.PARAMETER PolicyResource
-			The resource in the policy document to apply the policy to. This defaults to the CloudfrontUrl, but could be a url with a wildcard. This parameter typically does not need to be
-			used. Defining a resource other than the url is really only useful if the policy was in a template file so you could reuse that template for several different CF urls.
-
-		.PARAMETER StartTime
-			The time the Url starts to be valid. This defaults to the MinValue for .NET DateTime object.
-
-		.PARAMETER SourceIp
-			If you want to restrict access to the Cloudfront distribution to a certain IP or IP range, specify an IPv4 CIDR block (use a /32 for a specific IP address).
-
-		.PARAMETER Expiration
-			The time the signed url expires, this value must be later than the start time and the current time.
-
-		.PARAMETER KeyPairId
-			This is the Cloudfront KeyPair Id generated in the AWS management console using root credentials specifically for signing Cloudfront urls.
-
-		.EXAMPLE
-			New-CloudFrontSignedUrl -PemFileLocation c:\cert.pem -CloudfrontUrl http://d111111abcdef8.cloudfront.net/images/image.jpg -Expiration ([System.DateTime]::Now.AddHours(1))
-
-			Creates a signed url for the image.jpg object that expires in 1 hour from now.
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			System.String
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 4/27/2107
-	#>
-	[CmdletBinding()]
-	Param(
-		[Parameter(Mandatory = $true, ParameterSetName = "File")]
-		[ValidateScript({Test-Path -Path $_})]
-		[System.String]$PemFileLocation,
-
-		[Parameter(Mandatory = $true, ValueFromPipeline = $true, ParameterSetName = "Pem")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$PEM,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [System.String]$CloudfrontUrl,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$PolicyResource= $CloudfrontUrl,
-
-		[Parameter()]
-		[System.DateTime]$StartTime = [System.DateTime]::MinValue,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SourceIp,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateScript({
-            $_ -gt [System.DateTime]::Now
-        })]
-        [System.DateTime]$Expiration,
-
-        [Parameter(Mandatory = $true)]
-        [System.String]$KeyPairId
-	)
-
-	Begin {
-
-		Function Get-RsaKeysFromPem {
-            [CmdletBinding()]
-			Param(
-				[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-				[System.String]$PEM
-			)
-
-			Begin {
-				$Ret = Add-Type -Path "$(Split-Path -Path $script:MyInvocation.MyCommand.Path)\BouncyCastle.Crypto.dll" -ErrorAction SilentlyContinue
-			}
-
-			Process {
-				[System.IO.MemoryStream]$Stream = New-Object System.IO.MemoryStream
-				[System.IO.StreamWriter]$Writer = New-Object System.IO.StreamWriter($Stream)
-
-				$Writer.Write($PEM)
-				$Writer.Flush()
-				$Stream.Position = 0
-
-				[System.IO.StreamReader]$Reader = New-Object System.IO.StreamReader($Stream)
-
-				try
-				{
-					[Org.BouncyCastle.OpenSsl.PemReader]$PemReader = New-Object -TypeName Org.BouncyCastle.OpenSsl.PemReader($Reader)
-
-					if ($PEM.StartsWith("-----BEGIN RSA PRIVATE KEY-----") -or $PEM.StartsWith("-----BEGIN PRIVATE KEY-----"))
-					{   
-						#This read object could already be a [Org.BouncyCastle.Crypto.Parameters.RsaPrivateCrtKeyParameters] object, in which case, 
-						#you don't need to tranform the Private property, just the whole object
-
-						[Org.BouncyCastle.Crypto.Parameters.RsaPrivateCrtKeyParameters]$KeyParams = $null
-
-						[System.Object]$Temp = $PemReader.ReadObject()
-
-                        try
-						{
-							$KeyParams = [Org.BouncyCastle.Crypto.Parameters.RsaPrivateCrtKeyParameters]$Temp
-						}
-						catch [Exception]
-						{
-							[Org.BouncyCastle.Crypto.AsymmetricCipherKeyPair]$KeyPair = [Org.BouncyCastle.Crypto.AsymmetricCipherKeyPair]$Temp
-							$KeyParams = [Org.BouncyCastle.Crypto.Parameters.RsaPrivateCrtKeyParameters]$KeyPair.Private
-						}
-
-						[System.Security.Cryptography.RSAParameters]$RsaParams = New-Object -TypeName System.Security.Cryptography.RSAParameters
-						$RsaParams.Modulus = $KeyParams.Modulus.ToByteArrayUnsigned()
-						$RsaParams.Exponent = $KeyParams.PublicExponent.ToByteArrayUnsigned()
-						$RsaParams.D = $KeyParams.Exponent.ToByteArrayUnsigned()
-						$RsaParams.P = $KeyParams.P.ToByteArrayUnsigned()
-						$RsaParams.Q = $KeyParams.Q.ToByteArrayUnsigned()
-						$RsaParams.DP = $KeyParams.DP.ToByteArrayUnsigned()
-						$RsaParams.DQ = $KeyParams.DQ.ToByteArrayUnsigned()
-						$RsaParams.InverseQ = $KeyParams.QInv.ToByteArrayUnsigned()
-					}
-					elseif ($PEM.StartsWith("-----BEGIN PUBLIC KEY-----"))
-					{
-						[Org.BouncyCastle.Crypto.Parameters.RsaKeyParameters]$KeyParams = [Org.BouncyCastle.Crypto.Parameters.RsaKeyParameters]$PemReader.ReadObject()
-						[System.Security.Cryptography.RSAParameters]$RsaParams = New-Object -TypeName System.Security.Cryptography.RSAParameters
-						$RsaParams.Modulus = $KeyParams.Modulus.ToByteArrayUnsigned()
-
-						if ($KeyParams.IsPrivate)
-						{
-							$RsaParams.D = $KeyParams.Exponent.ToByteArrayUnsigned()
-						}
-						else
-						{
-							$RsaParams.Exponent = $KeyParams.Exponent.ToByteArrayUnsigned()
-						}
-					}
-					else
-					{
-						throw New-Object -TypeName System.Security.Cryptography.CryptographicException("Unsupported PEM format.")
-					}
-
-					[System.Security.Cryptography.RSA]$Key = [System.Security.Cryptography.RSA]::Create()
-					$Key.ImportParameters($RsaParams)
-                    
-					Write-Output -InputObject $Key
-				}
-				finally
-				{
-					$Reader.Dispose()
-					$Stream.Dispose()
-					$Writer.Dispose()
-				}
-			}
-
-			End {
-			}
-		}
-
-		Function ConvertRsaTo-Xml {
-            [CmdletBinding()]
-			Param(
-				[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-				[System.Security.Cryptography.RSA]$RSA,
-
-				[Parameter()]
-				[switch]$IncludePrivateParameters
-			)
-
-			Begin {
-			}
-
-			Process {
-				[System.Security.Cryptography.RSAParameters]$RsaParams = $RSA.ExportParameters(($IncludePrivateParameters -eq $true))
-
-				$Xml = @"
-<RSAKeyValue>
-  <Modulus>$([System.Convert]::ToBase64String($RsaParams.Modulus))</Modulus>
-  <Exponent>$([System.Convert]::ToBase64String($RsaParams.Exponent))</Exponent>
-  <P>$([System.Convert]::ToBase64String($RsaParams.P))</P>
-  <Q>$([System.Convert]::ToBase64String($RsaParams.Q))</Q>
-  <DP>$([System.Convert]::ToBase64String($RsaParams.DP))</DP>
-  <DQ>$([System.Convert]::ToBase64String($RsaParams.DQ))</DQ>
-  <InverseQ>$([System.Convert]::ToBase64String($RsaParams.InverseQ))</InverseQ>
-  <D>$([System.Convert]::ToBase64String($RsaParams.D))</D>
-</RSAKeyValue>
-"@
-				Write-Output -InputObject $Xml
-			}
-
-			End {
-			}
-		}
-	} 
-
-	Process {
-        $StartTime = $StartTime.ToUniversalTime()
-        $Expiration = $Expiration.ToUniversalTime()
-
-        [System.DateTime]$Epoch = New-Object System.DateTime(1970, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc)
-
-        [System.Int32]$Seconds = $Expiration.Subtract($Epoch).TotalSeconds
-		[System.Int32]$Start = 0
-
-		if ($StartTime -gt $Epoch)
-		{
-            $Start = $StartTime.Subtract($Epoch).TotalSeconds
-		}
-
-		if ([System.String]::IsNullOrEmpty($SourceIp))
-		{
-			$SourceIp = "0.0.0.0/0"
-		}
-
-        $PolicyStatement = @"
-{
-  "Statement": [
-    {
-      "Resource" : "$PolicyResource",
-      "Condition" : {
-        "DateLessThan" : {		 
-          "AWS:EpochTime" : $Seconds
-        },
-        "DateGreaterThan" : {
-	      "AWS:EpochTime": $Start
-		},
-		"IpAddress" : {
-		  "AWS:SourceIp" : "$SourceIp"
-		}
-      }
-    }
-  ]
-}
-"@
-		#AWS requires that all white space be removed from the policy statement
-		$PolicyStatement = $PolicyStatement -replace "\s",""
-
-		[System.Byte[]]$PolicyStatementBytes = [System.Text.Encoding]::ASCII.GetBytes($PolicyStatement)
-
-        [System.Security.Cryptography.SHA1CryptoServiceProvider]$SHA1 = New-Object -TypeName System.Security.Cryptography.SHA1CryptoServiceProvider
-        [System.Byte[]]$PolicyHash = $SHA1.ComputeHash($PolicyStatementBytes)
-
-		#Replace hashed characters with URL safe characters, these are defined by AWS in their instructions
-		[System.String]$Base64Policy = [System.Convert]::ToBase64String($PolicyStatementBytes).Replace("+", "-").Replace("=", "_").Replace("/", "~")
-
-		#Otherwise, the PEM content was included as a parameter
-		if ($PSCmdlet.ParameterSetName -eq "File")
-		{
-			$PEM = Get-Content -Path $PemFileLocation -Raw
-		}
-        
-		[System.String]$Xml = Get-RsaKeysFromPem -PEM $PEM | ConvertRsaTo-Xml -IncludePrivateParameters
-
-		[System.Security.Cryptography.RSACryptoServiceProvider]$RSA = New-Object -TypeName System.Security.Cryptography.RSACryptoServiceProvider
-		$RSA.FromXmlString($Xml)
-
-		[System.Security.Cryptography.RSAPKCS1SignatureFormatter]$RSAFormatter = New-Object -TypeName System.Security.Cryptography.RSAPKCS1SignatureFormatter($RSA)
-		$RSAFormatter.SetHashAlgorithm("SHA1")
-
-		[System.Byte[]]$SignedPolicyHash = $RSAFormatter.CreateSignature($PolicyHash)
-
-		[System.String]$Signature = [System.Convert]::ToBase64String($SignedPolicyHash).Replace("+", "-").Replace("=", "_").Replace("/", "~")
-		
-		[System.Uri]$Url = New-Object -TypeName System.Uri($CloudfrontUrl)
-
-		#Remove the leading ? in the query statement because we're going to add one explicitly as we need to add query string parameters
-		#even if a query wasn't provided in the Url parameter
-		[System.String]$Query = $Url.Query.Replace("?", "")
-
-		#If the submitted url does have a query, add an ampersand because we'll append our query parameters after the user provided query
-		if (-not [System.String]::IsNullOrEmpty($Query))
-		{
-			$Query += "&"
-		}
-
-		[System.String]$PrivateUrl = "$($Url.Scheme)://$($Url.DnsSafeHost)$($Url.AbsolutePath)?$Query`Policy=$Base64Policy&Signature=$Signature&Key-Pair-Id=$KeyPairId"
-
-		Write-Output -InputObject $PrivateUrl 
-	}
-
-	End {
-	}
-}
-
 Function New-AWSSplat {
 	<#
 		.SYNOPSIS
@@ -1632,12 +1329,12 @@ Function New-AWSSplat {
 
             if (-not [System.String]::IsNullOrEmpty($RegionTemp))
             {
-			    #Get-DefaultAWSRegions returns a Amazon.Powershell.Common.AWSRegion object
+			    # Get-DefaultAWSRegions returns a Amazon.Powershell.Common.AWSRegion object
  			    $CommonSplat.Region = [Amazon.RegionEndpoint]::GetBySystemName($RegionTemp) | Select-Object -ExpandProperty SystemName
             }
             else
             {
-                #No default region set
+                # No default region set
                 $CommonSplat.Region = [Amazon.RegionEndpoint]::GetBySystemName($DefaultRegion) | Select-Object -ExpandProperty SystemName
             }
 		}
@@ -1777,7 +1474,7 @@ Function New-AWSUtilitiesSplat {
 	}
 
 	Process {
-		#Map the common AWS parameters
+		# Map the common AWS parameters
         [System.Collections.Hashtable]$CommonSplat = @{}
 
 		if ($PSCmdlet.ParameterSetName -eq "Specify")
@@ -1792,12 +1489,12 @@ Function New-AWSUtilitiesSplat {
 
 				if (-not [System.String]::IsNullOrEmpty($RegionTemp))
 				{
-					#Get-DefaultAWSRegions returns a Amazon.Powershell.Common.AWSRegion object
+					# Get-DefaultAWSRegions returns a Amazon.Powershell.Common.AWSRegion object
  					[Amazon.RegionEndpoint]$CommonSplat.Region = [Amazon.RegionEndpoint]::GetBySystemName($RegionTemp)
 				}
 				else
 				{
-					#No default region set
+					# No default region set
 					[Amazon.RegionEndpoint]$CommonSplat.Region = [Amazon.RegionEndpoint]::GetBySystemName($DefaultRegion)
 				}
 			}
