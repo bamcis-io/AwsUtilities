@@ -1009,223 +1009,6 @@ Function New-EBSAutomatedSnapshot {
 	}
 }
 
-Function Get-AWSPriceListProductInformation {
-	<#
-		.SYNOPSIS
-			This cmdlet evaluates the data in the AWS Price List API json and returns information about products that match the search criteria.
-
-		.DESCRIPTION
-			The cmdlet parses the json in a specified file on disk retrieved from the price list API or downloads it directly from the provided Url. It matches products
-			against the specified attributes. This is useful to find say all of the different SKUs and Operation codes for db.m4.large instances in US East (N. Virginia).
-
-		.PARAMETER Path
-			The path to the downloaded price list API file.
-
-		.PARAMETER Url
-			The Url containing the price list information for the product you want.
-
-		.PARAMETER Product
-			The product you want to download price list information for.
-
-		.PARAMETER Attributes
-			The attributes used to match specific skus in the price list API. Attributes will look like: @{"location" = "US East (N. Virginia)"; "instanceType" = "db.m4.large"; "databaseEngine" = "PostgreSQL"}
-
-		.EXAMPLE
-			Get-AWSProductInformation -Product AmazonRDS -Attributes @{"location" = "US East (N. Virginia)"; "instanceType" = "db.m4.large"; "databaseEngine" = "PostgreSQL"}
-
-			Gets matching RDS skus for the attributes specified
-
-		.EXAMPLE
-			Get-AWSPriceListProductInformation -Url https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonRDS/current/index.json -Attributes @{"location" = "US East (N. Virginia)"; "instanceType" = "db.m4.large"; "databaseEngine" = "PostgreSQL"}
-
-			Gets matching RDS skus for the attributes specified
-
-		.EXAMPLE
-			Get-AWSPriceListProductInformation -Product AmazonEC2 -Attributes @{"location" = "US East (N. Virginia)"; "instanceType" = "m4.large"}
-
-			Gets matching EC2 skus for the attributes specified
-
-		.EXAMPLE
-			Get-AWSPriceListProductInformation -Path index.json -Attributes @{"location" = "US East (N. Virginia)"; "instanceType" = "m4.large"}
-	
-			Gets matching EC2 skus for the attributes specified
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			System.Management.Automation.PSCustomObject
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 1/14/2019
-
-	#>
-	[CmdletBinding(DefaultParameterSetName = "Path")]
-	Param(
-		[Parameter(Mandatory = $true, ParameterSetName = "Path")]
-		[ValidateScript({Test-Path $_})]
-		[System.String]$Path,
-
-		[Parameter(Mandatory=$true)]
-		[System.Collections.Hashtable]$Attributes
-	)
-
-	DynamicParam {
-		[System.Management.Automation.RuntimeDefinedParameterDictionary]$ParamDictionary = New-Object -TypeName System.Management.Automation.RuntimeDefinedParameterDictionary
-
-		[System.String]$OfferIndexUrl = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/index.json"
-        [System.String]$BaseUrl = "https://pricing.us-east-1.amazonaws.com"
-
-		[System.Net.WebClient]$WebClient = New-Object -TypeName System.Net.WebClient
-		[System.String]$Response = $WebClient.DownloadString($OfferIndexUrl)
-
-		$IndexFileContents = ConvertFrom-Json -InputObject $Response
-
-		[System.String[]]$Results = @()
-
-        $IndexFileContents.offers | Get-Member -MemberType *Property | ForEach-Object {
-			try 
-			{
-				$Results += "$BaseUrl$($IndexFileContents.offers | Select-Object -ExpandProperty $_.Name | Select-Object -ExpandProperty currentVersionUrl)"
-			}
-			catch {}
-        }
-
-        [System.Management.Automation.ParameterAttribute]$UrlAttributes = New-Object -TypeName System.Management.Automation.ParameterAttribute
-		$UrlAttributes.ValueFromPipeline = $true
-        $UrlAttributes.Mandatory = $true
-		$UrlAttributes.ParameterSetName = "Url"
-
-		[System.Collections.ObjectModel.Collection[System.Attribute]]$UrlAttributeCollection = New-Object -TypeName System.Collections.ObjectModel.Collection[System.Attribute]
-        $UrlAttributeCollection.Add($UrlAttributes)
-
-		[System.Management.Automation.ValidateSetAttribute]$UrlValidateSet = New-Object -TypeName System.Management.Automation.ValidateSetAttribute($Results)
-        $UrlAttributeCollection.Add($UrlValidateSet)
-
-        [System.Management.Automation.RuntimeDefinedParameter]$UrlParam = New-Object -TypeName System.Management.Automation.RuntimeDefinedParameter("Url", [System.String], $UrlAttributeCollection)
-        $ParamDictionary.Add("Url", $UrlParam)
-
-		[System.Management.Automation.ParameterAttribute]$ProductAttributes = New-Object -TypeName System.Management.Automation.ParameterAttribute
-		$ProductAttributes.ValueFromPipeline = $true
-        $ProductAttributes.Mandatory = $true
-		$ProductAttributes.ParameterSetName = "Product"
-
-		[System.Collections.ObjectModel.Collection[System.Attribute]]$ProductAttributeCollection = New-Object -TypeName System.Collections.ObjectModel.Collection[System.Attribute]
-        $ProductAttributeCollection.Add($ProductAttributes)
-
-		[System.Management.Automation.ValidateSetAttribute]$ProductValidateSet = New-Object -TypeName System.Management.Automation.ValidateSetAttribute($private:IndexFileContents.offers| Get-Member -MemberType *Property | Select-Object -ExpandProperty Name)
-        $ProductAttributeCollection.Add($ProductValidateSet)
-
-        [System.Management.Automation.RuntimeDefinedParameter]$ProductParam = New-Object -TypeName System.Management.Automation.RuntimeDefinedParameter("Product", [System.String], $ProductAttributeCollection)
-        $ParamDictionary.Add("Product", $ProductParam)
-
-		Write-Output -InputObject $ParamDictionary
-	}
-
-	Begin {
-	}
-
-	Process
-	{
-		[System.String]$private:BaseUrl = "https://pricing.us-east-1.amazonaws.com"
-
-		if ($PSCmdlet.ParameterSetName -eq "Url")
-		{			
-			[System.Net.WebClient]$private:WebClient = New-Object -TypeName System.Net.WebClient
-			[System.String]$private:Response = $private:WebClient.DownloadString($PSBoundParameters["Url"])
-		}
-		elseif ($PSCmdlet.ParameterSetName -eq "Product")
-		{
-			[System.Net.WebClient]$private:WebClient = New-Object -TypeName System.Net.WebClient
-			[System.String]$private:Response = $private:WebClient.DownloadString($OfferIndexUrl)
-
-			$private:IndexFileContents = ConvertFrom-Json -InputObject $private:Response
-
-			$private:Url = "$private:BaseUrl$($private:IndexFileContents.offers | Select-Object -ExpandProperty $PSBoundParameters["Product"] | Select-Object -ExpandProperty currentVersionUrl)"
-            [System.Net.WebClient]$private:WebClient = New-Object -TypeName System.Net.WebClient
-			
-			Write-Verbose -Message $private:Url
-			[System.String]$private:Response = $WebClient.DownloadString($private:Url)
-		}
-		else
-		{
-			$private:Response = Get-Content -Path $Path -Raw
-		}
-
-		<#
-			The converted Obj object will look like the following:
-
-			formatVersion   : v1.0
-			disclaimer      : This pricing list is for informational purposes only. All prices are subject to the additional terms included in the pricing pages on http://aws.amazon.com. All Free Tier 
-							  prices are also subject to the terms included at https://aws.amazon.com/free/
-			offerCode       : AmazonElastiCache
-			version         : 20170419194925
-			publicationDate : 2017-04-19T19:49:25Z
-			products        : @{HBRQZSXXSY2DXJ77=; 3Y8QARGM5NXC9EBW=; ... }
-			terms           : @{OnDemand=; Reserved=}
-		#>
-		$private:ConvertedResponse = ConvertFrom-Json -InputObject $private:Response
-
-		[PSCustomObject[]]$private:Results = @()
-
-		# Expanding the products property gets us a single object with members like
-		# RBW79EQZWRSDB85D : @{sku=RBW79EQZWRSDB85D; productFamily=Database Instance; attributes=}
-		# W3PUKFKG7RDK3KA5 : @{sku=W3PUKFKG7RDK3KA5; productFamily=Data Transfer; attributes=}
-		
-		# We want to expand the property of the products object for each sku to access the hash table that has the data
-		<#
-			Products will look like
-			8W42JWEZE64YAUET : @{sku=8W42JWEZE64YAUET; productFamily=Cache Instance; attributes=}
-			T64VHYZ5FZP9JDEC : @{sku=T64VHYZ5FZP9JDEC; productFamily=Cache Instance; attributes=}
-		#>
-		[PSCustomObject]$private:Products = $private:ConvertedResponse | Select-Object -ExpandProperty products 
-
-		# Getting the members of Products will get us all of the sku properties, we want to iterate each
-		# one and select it, expanded from the products object, which will provide the hash table of data
-		# which includes sku, productFamily, and attributes
-		Get-Member -InputObject $private:Products -MemberType *Property | ForEach-Object {
-			
-            # The Get-Member results will have a name property, that is the sku data for each product
-			# By expanding the name property, we get the values of the sku index, which are the properties
-			# like attributes and productfamily
-			[PSCustomObject]$private:ProductData = $private:Products | Select-Object -ExpandProperty $_.Name
-
-            [System.Collections.Hashtable]$private:TempHashTable = @{}
-            
-            # Convert the PSCustomObject to a hash table
-            $private:ProductData.attributes.psobject.Properties | ForEach-Object  {
-                $private:TempHashTable[$_.Name] = $_.Value
-            }
-
-			# Assume the product matches the filters, and prove it false
-			$private:Matches = $true
-
-			# Now that we have product object, we can filter based on the key value pairs provided
-			foreach ($Key in $Attributes.Keys)
-			{
-                # If the hash table doesn't contain the key and the values are not alike, it doesn't match
-                # Otherwise, keep going
-                if (-not ($private:TempHashTable.ContainsKey($Key) -and $private:TempHashTable[$Key] -like $Attributes[$Key]))
-                {                    
-                    $private:Matches = $false
-                    break                    
-                }
-			}
-
-			if ($private:Matches -eq $true)
-			{
-                $private:Results += [PSCustomObject]@{"Sku" = $private:ProductData.sku; "ProductFamily" = $private:ProductData.productFamily; "Attributes" = $TempHashTable}
-			}
-		}
-
-		Write-Output -InputObject $private:Results
-	}
-
-	End {		
-	}
-}
-
 Function New-AWSSplat {
 	<#
 		.SYNOPSIS
@@ -1316,7 +1099,7 @@ Function New-AWSSplat {
 	}
 
 	Process {
-		#Map the common AWS parameters
+		# Map the common AWS parameters
         $CommonSplat = @{}
 
         if ($PSBoundParameters.ContainsKey("Region") -and $Region -ne $null)
@@ -1379,7 +1162,7 @@ Function New-AWSSplat {
 Function New-AWSUtilitiesSplat {
 	<#
 		.SYNOPSIS
-			Builds a hashtable that can be used as a splat for default AWS parameters.
+			Builds a hashtable that can be used as a splat for default AWS parameters in the AWS Utilities PowerShell module.
 
 		.DESCRIPTION
 			Creates a hashtable that contains the common AWS Parameters for authentication and location. This collection can then be used as a splat against AWS Utilities PowerShell cmdlets.
@@ -1422,16 +1205,16 @@ Function New-AWSUtilitiesSplat {
 			Creates a splat for us-east-1 using credentials stored in the myprodaccount profile.
 
 		.INPUTS
-			None
+			System.Collections.Hashtable
 
 		.OUTPUTS
-			None
+			System.Collections.Hashtable
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 4/15/2107
+			LAST UPDATE: 1/16/2019
 	#>
-	[CmdletBinding(DefaultParameterSetName="Specify")]
+	[CmdletBinding(DefaultParameterSetName = "Specify")]
 	Param(
 		[Parameter(ParameterSetName="Specify")]
 		[ValidateNotNull()]
@@ -1465,7 +1248,7 @@ Function New-AWSUtilitiesSplat {
         [ValidateNotNullOrEmpty()]
         [System.String]$DefaultRegion = "us-east-1",
 
-		[Parameter(ParameterSetName = "Splat")]
+		[Parameter(ParameterSetName = "Splat", ValueFromPipeline = $true, Position = 0)]
 		[ValidateNotNull()]
 		[System.Collections.Hashtable]$AWSSplat
 	)
@@ -1567,7 +1350,7 @@ Function Copy-EBSVolume {
 			If a destination EC2 instance is not specified either by Id or name, the volumes are created in the destination region, but are not
 			attached to anything and the cmdlet will return details about the volumes.
 
-			The volume are attached to the first available device on the EC2 instance starting at xvdf and will attach until xvdp.
+			The volumes are attached to the first available device on the EC2 instance starting at xvdf and will attach until xvdp.
 
 		.PARAMETER SourceInstanceId
 			The Id of the source EC2 instance to copy EBS volumes from.
@@ -1660,6 +1443,11 @@ Function Copy-EBSVolume {
 			
 			Copies the EBS volume(s) from server1 in us-west-2 and attaches them to server2 in us-east-2. 
 
+		.EXAMPLE
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
+			
+			Copies the EBS volume(s) from server1 in us-west-2 to us-east-2. The new volumes are unattached.
+
 		.INPUTS
 			None
 
@@ -1668,7 +1456,7 @@ Function Copy-EBSVolume {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 9/26/2017
+			LAST UPDATE: 1/14/2019
     #>
     [CmdletBinding()]
     Param(
@@ -1743,7 +1531,7 @@ Function Copy-EBSVolume {
 		[System.UInt32]$Timeout = 900,
 
 		[Parameter()]
-		[switch]$EncryptNewVolumes,
+		[Switch]$EncryptNewVolumes,
 
 		[Parameter()]
 		[Amazon.EC2.VolumeType]$VolumeType,
@@ -1895,13 +1683,25 @@ Function Copy-EBSVolume {
 		# Test this here so we can throw early and not go through creating snapshots before we find this out
 		# The dynamic param VolumeSize should only be added if there is 1 source volume, but
 		# but let's make sure
+		# Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
 		if ($PSBoundParameters.ContainsKey("VolumeSize") -and $EBSVolumes.Length -eq 1)
 		{
 			[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
 
-			if ($Size -lt $EBSVolumes[0].Size)
+			foreach ($Vol in $EBSVolumes)
 			{
-				throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($EBSVolumes[0].Size) GiB."
+				if ($Size -lt $Vol.Size)
+				{
+					throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($Vol.Size) GiB for $($Vol.VolumeId)."
+				}
+
+				# We don't need to check the other types since they all use the same upper limit, which was checked by the 
+				# parameter validation, and the value can't be less than the minimum since the existing volumes must comply
+				# with that minimum
+				if ($Vol.VolumeType -eq [Amazon.EC2.VolumeType]::Standard -and $Size -gt 1024)
+				{
+					throw "The specified size, $Size GiB, is greater than 1024, the maximum size for the Standard volume type."				
+				}
 			}
 		}
 
@@ -2467,7 +2267,7 @@ Function Get-EC2InstanceByNameOrId {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 6/5/2017
+			LAST UPDATE: 1/16/2019
 	#>
 	[CmdletBinding()]
 	Param(
@@ -2525,12 +2325,12 @@ Function Get-EC2InstanceByNameOrId {
 			Write-Verbose -Message "Getting instance by Name $InstanceName."
 			[Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
 
-			#Filtering on tag values uses the "tag:" preface for the key name
+			# Filtering on tag values uses the "tag:" preface for the key name
 			$Filter.Name = "tag:Name"
 			$Filter.Value = $InstanceName
                 
-			#This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
-			#so save the error output and don't strongly type it
+			# This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
+			# so save the error output and don't strongly type it
 			$Instances = Get-EC2Instance -Filter @($Filter) -ErrorAction SilentlyContinue @Splat
 		}
 
@@ -2545,6 +2345,10 @@ Function Get-EC2InstanceByNameOrId {
 					if ($EC2 -eq $null)
 					{
 						throw "No matching instances found."
+					}
+					else
+					{
+						Write-Output -InputObject $EC2
 					}
 				}
 				else
@@ -2561,8 +2365,6 @@ Function Get-EC2InstanceByNameOrId {
 		{
 			throw "Nothing was returned by the get instance request."
 		}
-
-		Write-Output -InputObject $EC2
 	}
 
 	End {
@@ -3891,11 +3693,11 @@ Function Set-EC2InstanceState {
 
 		if ($PSCmdlet.ParameterSetName.Equals("Id"))
 		{
-			$InstanceSplat.InstanceId = $InstanceId
+			$InstanceSplat.Add("InstanceId", $InstanceId)
 		}
 		else
 		{
-			$InstanceSplat.InstanceName = $InstanceName
+			$InstanceSplat.Add("InstanceName", $InstanceName)
 		}
 
 		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
@@ -4051,7 +3853,7 @@ Function Update-EC2InstanceAmiId {
 			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
 
 		.EXAMPLE
-			Update-EC2InstanceAmiId
+			Update-EC2InstanceAmiId -InstanceId i-123456789012 -NewAmiId "ami-123456789012"
 
 			Changes the AMI id being used for the specified instance
 
@@ -4124,12 +3926,12 @@ Function Update-EC2InstanceAmiId {
 		if ($PSCmdlet.ParameterSetName -eq "Id")
 		{
 			Write-Verbose -Message "Using instance id $InstanceId."
-			$InstanceSplat.InstanceId = $InstanceId
+			$InstanceSplat.Add("InstanceId", $InstanceId)
 		}
 		else
 		{
 			Write-Verbose -Message "Using instance name $InstanceName."
-			$InstanceSplat.InstanceName = $InstanceName
+			$InstanceSplat.Add("InstanceName", $InstanceName)
 		}
 
 		# Get the source EC2 instance
@@ -4537,7 +4339,7 @@ Function Invoke-EnableCloudWatch {
 			[System.String]$CloudWatchLogConfigDestination = "$env:ProgramFiles\Amazon\Ec2ConfigService\Settings\AWS.EC2.Windows.CloudWatch.json"
 			[System.String]$EC2SettingsFile="$env:ProgramFiles\Amazon\Ec2ConfigService\Settings\Config.xml"
 
-			Write-Log -Message "Enabling CloudWatch Logs."
+			Write-Host -Message "Enabling CloudWatch Logs."
 
 			$AWSSoftware = Get-AWSSoftware
 			$SSMSoftware = $AWSSoftware | Where-Object -FilterScript {$_.DisplayName -eq "Amazon SSM Agent"} | Select-Object -First 1
@@ -4545,7 +4347,7 @@ Function Invoke-EnableCloudWatch {
 
 			if ($SSMSoftware -ne $null -and -not [System.String]::IsNullOrEmpty($SSMDocument))
 			{
-				Write-Log -Message "Using SSM to configure CloudWatch."
+				Write-Host -Message "Using SSM to configure CloudWatch."
 					
 				$ServiceName = "AmazonSSMAgent"
 
@@ -4553,12 +4355,12 @@ Function Invoke-EnableCloudWatch {
 
 				try
 				{
-					Write-Log -Message "Updating SSM agent to latest."
+					Write-Host -Message "Updating SSM agent to latest."
 					New-SSMAssociation -InstanceId $InstanceId -Name "AWS-UpdateSSMAgent" -Force
 				}
 				catch [Amazon.SimpleSystemsManagement.Model.AssociationAlreadyExistsException]
 				{
-					Write-Log -Message "The AWS-UpdateSSMAgent association already exists."
+					Write-Host -Message "The AWS-UpdateSSMAgent association already exists."
 				}
 
 				try
@@ -4709,17 +4511,22 @@ catch [Exception] {
 		}
 	}
 
-Function Get-AWSAmiMappings {
+Function Get-AWSCurrentImageIds {
 	<#
 		.SYNOPSIS 
-			Gets the most current AMI image id for Windows and Amazon Linux instances in each region.
+			Gets the most current AMI image id for Windows and Amazon Linux, Debian, CentOS, Ubuntu, and SLES instances in each region.
 
 		.DESCRIPTION
-			The cmdlet retrieves the most current AMI image id for Windows Server 2012 through Windows Server 2019, Amazon Linux, and Amazon Linux 2. The output is a	
-			json formatted string that is targetted for usage in a Mappings section in an AWS Cloudformation script.
+			The cmdlet retrieves the most current AMI image id for Windows Server 2012 through Windows Server 2019, Amazon Linux, Amazon Linux 2, Ubuntu 18.04, SLES 15, CentOS 7 and Debian 9. 
+
+            Mappings for ARM and x86 processors are provided as well as Linux images with .NET Core 2.1 pre-installed. 
+
+            The output is a	json formatted string that is targetted for usage in the Mappings section in an AWS Cloudformation script. This gives you an easy way to reference the most recent AMI id for an OS in CloudFormation as well as easily update that mapping element over time.
 
 		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. 
+
+            If this parameter is specified, the AMI mappings are only returned for that region, otherwise mappings are returned for every region.
 
 		.PARAMETER AccessKey
 			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
@@ -4746,9 +4553,14 @@ Function Get-AWSAmiMappings {
 			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
 
 		.EXAMPLE
-			Get-AWSAmiMappings
+			Get-AWSCurrentImageIds
 
-			Retrieves the AMI mappings for Windows Server and Amazon Linux.
+			Retrieves the AMI mappings for all included Operating Systems in every public region.
+
+		.EXAMPLE
+			Get-AWSCurrentImageIds -Region ([Amazon.RegionEndpoint]::UsEast1) -ProfileName myprodprofile
+
+			Gets the AMI mappings for all included Operating Systems in the us-east-1 region using the credentials in the "myprodprofile" profile.
 		
 		.INPUTS
 			None
@@ -4758,7 +4570,7 @@ Function Get-AWSAmiMappings {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 1/10/2019		
+			LAST UPDATE: 1/17/2019		
 	#>
     [CmdletBinding()]
     Param(
@@ -4793,47 +4605,90 @@ Function Get-AWSAmiMappings {
 
     Begin {
         $OperatingSystems = @{
-			WindowsServer2019 = "Windows_Server-2019-English-Full-Base-*"
-            WindowsServer2016 = "Windows_Server-2016-English-Full-Base-*"
-            WindowsServer2012R2 = "Windows_Server-2012-R2_RTM-English-64Bit-Base-*"
-            WindowsServer2012 = "Windows_Server-2012-RTM-English-64Bit-Base-*"
-            AmazonLinux = "amzn-ami-hvm-*-x86_64-gp2"
-			AmazonLinux2 = "amzn2-ami-hvm-*-x86_64-gp2"
+			WindowsServer2019 = "Windows_Server-2019-English-Full-Base-*";
+            WindowsServer2016 = "Windows_Server-2016-English-Full-Base-*";
+            WindowsServer2012R2 = "Windows_Server-2012-R2_RTM-English-64Bit-Base-*";
+            WindowsServer2012 = "Windows_Server-2012-RTM-English-64Bit-Base-*";
+            AmazonLinux_x86_64 = "amzn-ami-hvm-*-x86_64-gp2";
+			AmazonLinux2_x86_64 = "amzn2-ami-hvm-*-x86_64-gp2";
+			AmazonLinux2_arm64 = "amzn2-ami-hvm-*-arm64-gp2";
+			AmazonLinux2_netcore21_x86_64 = "amzn2-ami-hvm-*-x86_64-gp2-dotnetcore-*";
+			Ubuntu1804_x86_64 = "ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-amd64-server-20??????";
+			Ubuntu1804_arm64 = "ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-arm64-server-20??????";
+			Ubuntu1804_netcore21_x86_64 = "ubuntu-bionic-18.04-amd64-server-*-dotnetcore-*"
+			SUSE15_x86_64 = "suse-sles-15-*-hvm-ssd-x86_64";
+			CentOS7_x86_64 = "CentOS Linux 7 x86_64 HVM EBS ENA*";
+			Debian9_x86_64 = "debian-stretch-hvm-x86_64-gp2*";
         }
     }
 
     Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		
-        $Regions = Get-AWSRegion -IncludeGovCloud -IncludeChina @Splat
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+        $Splat.Remove("Region")		 
 
-        [System.Collections.Hashtable]$Results = @{}
-
-        foreach ($Region in $Regions)
+        if ($PSBoundParameters.ContainsKey("Region"))
         {
-            Write-Verbose -Message "Processing region $($Region.Region)."
-            [PSCustomObject]$RegionResults = [PSCustomObject]@{Name = $Region.Name}
-
-            $OperatingSystems.GetEnumerator() | Sort-Object -Property Key -Descending | ForEach-Object {
-                Write-Verbose -Message "Processing OS $($_.Key)."
-
-                [Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
-                $Filter.Name = "name"
-                $Filter.Value = $_.Value
-            
-                $Id = [System.String]::Empty
-                $Id = Get-EC2Image -Filter @($Filter) -Region $Region.Region -ErrorAction SilentlyContinue @Splat | Sort-Object -Property CreationDate -Descending | Select-Object -ExpandProperty ImageId -First 1
-
-                if (-not [System.String]::IsNullOrEmpty($Id))
-                {
-                    $RegionResults | Add-Member -MemberType NoteProperty -Name $_.Key -Value $Id
-                }
-            }
-
-           $Results.Add($Region.Region, $RegionResults)
+            [Amazon.PowerShell.Common.AWSRegion[]]$Regions = Get-AWSRegion -SystemName $Region.SystemName 
+        }
+        else
+        {
+            [Amazon.PowerShell.Common.AWSRegion[]]$Regions = Get-AWSRegion
         }
 
-        ConvertTo-Json -InputObject ($Results | Sort-Object -Property Key)
+        [PSCustomObject]$Results = [PSCustomObject]@{}
+
+        $Jobs = @()
+        
+        foreach ($Item in $Regions)
+        {
+            Write-Verbose -Message "Starting background job for region $($Item.Region)."
+
+            $Job = Start-Job -Name $Item.Name -ScriptBlock {
+                Import-Module AWSPowerShell
+                $Region = $using:Item
+                $Splat = $using:Splat
+                $OS = $using:OperatingSystems
+                
+                [PSCustomObject]$RegionResults = [PSCustomObject]@{Name = $Region.Name; Region = $Region.Region}
+
+                $OS.GetEnumerator() | Sort-Object -Property Key | ForEach-Object {
+                    try
+                    {
+                        $Key = $_.Key
+                        [Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
+                        $Filter.Name = "name"
+                        $Filter.Value = $_.Value
+            
+                        $Id = [System.String]::Empty
+                        $Id = Get-EC2Image -Filter @($Filter) -Region $Region.Region -ErrorAction SilentlyContinue @Splat | Sort-Object -Property CreationDate -Descending | Select-Object -ExpandProperty ImageId -First 1
+
+                        if (-not [System.String]::IsNullOrEmpty($Id))
+                        {
+                            $RegionResults | Add-Member -MemberType NoteProperty -Name $_.Key -Value $Id
+                        }
+                    }
+                    catch [Exception]
+                    {
+                        Write-Warning -Message "Error processing $Key in $($Region.Region): $($_.Exception.Message)"
+                    }
+                }
+                
+                Write-Output -InputObject $RegionResults
+            }
+
+            $Jobs += $Job
+        }
+        
+        Write-Verbose -Message "Waiting on jobs to complete"
+
+        [PSCustomObject[]]$JobResults = $Jobs | Receive-Job -AutoRemoveJob -Wait | Select-Object -Property * -ExcludeProperty PSComputerName,RunspaceId,PSSourceJobInstanceId,PSShowComputerName
+        
+        foreach ($Item in ($JobResults | Sort-Object -Property Region))
+        {
+            $Results | Add-Member -Name $Item.Region -Value ($Item | Select-Object -Property * -ExcludeProperty Region) -MemberType NoteProperty
+        }
+
+        Write-Output -InputObject ($Results | ConvertTo-Json)
     }
 
 	End {
@@ -4858,6 +4713,9 @@ Function Invoke-AWSKMSEncryptString {
 
 		.PARAMETER EncryptionContext
 			Name-value pair in a Hashtable that specifies the encryption context to be used for authenticated encryption. If used here, the same value must be supplied to the Decrypt API or decryption will fail.
+
+		.PARAMETER Encoding
+			The encoding to use to convert the text to bytes. This defaults to UTF-8.
 
 		.PARAMETER Region
 			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
@@ -4899,7 +4757,7 @@ Function Invoke-AWSKMSEncryptString {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 6/21/2017
+			LAST UPDATE: 1/17/2019
 	#>
 	[CmdletBinding()]
 	Param(
@@ -4914,6 +4772,10 @@ Function Invoke-AWSKMSEncryptString {
 		[Parameter()]
 		[ValidateNotNull()]
 		[System.Collections.Hashtable]$EncryptionContext,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8,
 
 		[Parameter()]
 		[ValidateNotNull()]
@@ -4952,7 +4814,7 @@ Function Invoke-AWSKMSEncryptString {
 
 		try
 		{
-			[System.Byte[]]$Bytes = [System.Text.Encoding]::UTF8.GetBytes($InputObject)
+			[System.Byte[]]$Bytes = $Encoding.GetBytes($InputObject)
 
 			[System.Collections.Hashtable]$ContextSplat = @{}
 
@@ -4991,6 +4853,9 @@ Function Invoke-AWSKMSDecryptString {
 
 		.PARAMETER EncryptionContext
 			Name-value pair in a Hashtable that specifies the encryption context to be used for authenticated encryption. The same value must be supplied to the Decrypt API as was supplied to the Encrypt API or decryption will fail.
+
+		.PARAMETER Encoding
+			The encoding to use to convert the bytes back to text. This defaults to UTF-8.
 
 		.PARAMETER Region
 			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
@@ -5033,7 +4898,7 @@ Function Invoke-AWSKMSDecryptString {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 6/21/2017
+			LAST UPDATE: 1/17/2019
 	#>
 	[CmdletBinding()]
 	Param(
@@ -5044,6 +4909,10 @@ Function Invoke-AWSKMSDecryptString {
 		[Parameter()]
 		[ValidateNotNull()]
 		[System.Collections.Hashtable]$EncryptionContext,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8,
 
 		[Parameter()]
 		[ValidateNotNull()]
@@ -5094,7 +4963,7 @@ Function Invoke-AWSKMSDecryptString {
 			[System.IO.MemoryStream]$MStream = New-Object -TypeName System.IO.MemoryStream($Bytes, 0, $Bytes.Length)
 			[Amazon.KeyManagementService.Model.DecryptResponse]$Response = Invoke-KMSDecrypt -CipherTextBlob $MStream @ContextSplat @Splat
 			
-			Write-Output -InputObject ([System.Text.Encoding]::UTF8.GetString($Response.PlainText.ToArray()))
+			Write-Output -InputObject ($Encoding.GetString($Response.PlainText.ToArray()))
 		}
 		finally
 		{
@@ -5116,8 +4985,10 @@ Function Get-AWSFederationLogonUrl {
 			Then, the cmdlet retrieves a federation signin token and then creates the login url. The provided credentials do not need to exist in the same account as the specified role, they just 
 			need permissions to be able to perform the sts:AssumeRole action for the provide role ARN.
 
+			The url can then be provided to a user to be able to access the management console with the credentials of the supplied role in the RoleArn parameter.
+
 		.PARAMETER RoleArn
-			The role in the account you want to assume and log into. This role must be assumed using long-term AWS credentials (not temporary credentials).
+			The role in the account you want to assume and log into. This role must be assumed using long-term AWS credentials (not temporary credentials). This is the role and permissions the user will have when accessing the management console. The user calling this cmdlet must have permisions to assume that role in order for the call to succeed.
 
 		.PARAMETER Duration
 			How long the assumed role credentials are good for between 900 and 3600 seconds. Regardless of what value is specified, the resulting Url is always valid for 15 minutes.
@@ -5153,9 +5024,9 @@ Function Get-AWSFederationLogonUrl {
 			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
 
 		.EXAMPLE
-			Get-AWSFederationLogonUrl -RoleArn "arn:aws:iam::123456789012:role/AdministratorRole" -ProfileName mycredentialprofile
+			Get-AWSFederationLogonUrl -RoleArn "arn:aws:iam::123456789012:role/AdministratorRole" -ProfileName mydev
 			
-			Gets the AWS management console signin url for the AdministratorRole in the 123456789012 account.
+			Gets the AWS management console signin url for the AdministratorRole in the 123456789012 account. The credentials stored in the mydev profile are used to call AssumeRole on the provided role and generate the federated logon url.
 
 		.INPUTS
 			None
@@ -5165,7 +5036,7 @@ Function Get-AWSFederationLogonUrl {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 6/30/2017
+			LAST UPDATE: 1/17/2019
 	#>
 	[CmdletBinding()]
 	Param(
@@ -5234,9 +5105,7 @@ Function Get-AWSFederationLogonUrl {
 			"SiginToken" : "UniqueStringHere"
 		}
 		#>
-		[System.Net.WebClient]$Client = New-Object -TypeName System.Net.WebClient
-
-		$Response = ConvertFrom-Json -InputObject $Client.DownloadString($Url)
+		[PSCustomObject]$Response = Invoke-WebRequest -Uri $Url -Method Get | Select-Object -ExpandProperty Content | ConvertFrom-Json
 
 		# Set the issuer if it wasn't provided by the user
 		if ([System.String]::IsNullOrEmpty($Issuer))
@@ -5313,9 +5182,11 @@ Function Get-AWSPublicIPRanges {
 	}
 
 	Process {
-		[System.Net.WebClient]$Client = New-Object -TypeName System.Net.WebClient
-		$Json = $Client.DownloadString($script:IPRangeUrl)
-		$Content = ConvertFrom-Json -InputObject $Json | Select-Object -ExpandProperty prefixes
+		$Content = Invoke-WebRequest -Uri $script:IPRangeUrl -Method Get | Select-Object -ExpandProperty Content | ConvertFrom-Json | Select-Object -ExpandProperty prefixes
+
+		#[System.Net.WebClient]$Client = New-Object -TypeName System.Net.WebClient
+		#$Json = $Client.DownloadString($script:IPRangeUrl)
+		#$Content = ConvertFrom-Json -InputObject $Json | Select-Object -ExpandProperty prefixes
 		
 		if ($Regions.Length -gt 0)
 		{
