@@ -30,7 +30,6 @@
     <Compile Include="AwsUtilities.psd1" />
     <Compile Include="AwsUtilities.psm1" />
     <Compile Include="AwsUtilities.tests.ps1" />
-    <Compile Include="BouncyCastle.Crypto.dll" />
   </ItemGroup>
   <Import Project="$(MSBuildBinPath)\Microsoft.CSharp.targets" />
   <Target Name="Build" />

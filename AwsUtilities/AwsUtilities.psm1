@@ -14,6 +14,8 @@ $script:MaxEC2Tags = 50
 Set-Variable -Name AWSRegions -Value (Get-AWSRegion -IncludeChina -IncludeGovCloud | Select-Object -ExpandProperty Region)
 Set-Variable -Name AWSPublicRegions -Value @(Get-AWSRegion | Select-Object -ExpandProperty Region)
 
+#region S3 Functions
+
 Function Get-S3ETagCalculation {
 	<#
 		.SYNOPSIS
@@ -180,6 +182,10 @@ Function Get-S3ETagCalculation {
 	}
 }
 
+#endregion
+
+#region EC2 Instance Metadata
+
 Function Get-EC2InstanceRegion {
 	<#
 		.SYNOPSIS
@@ -325,6 +331,603 @@ Function Get-EC2InstanceId {
 	End {
 	}
 }
+
+#endregion
+
+#region EC2 Functions
+
+Function Get-EC2InstanceByNameOrId {
+	<#
+		.SYNOPSIS
+			Gets an EC2 instance object by supplying its name or instance id.
+
+		.DESCRIPTION
+			The cmdlet gets a single Amazon.EC2.Model.Instance object from an instance name tag value or instance id. If multiple instances are
+			matched from a name tag, the cmdlet throws an exception, as it also does if it doesn't find an instance based on id.
+
+		.PARAMETER InstanceId
+			The id of the instance to get.
+
+		.PARAMETER InstanceName
+			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Get-EC2InstanceByNameOrId -Name server1 -ProfileName myprodacct
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			Amazon.EC2.Model.Instance
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/16/2019
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
+		[System.String]$InstanceId,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
+		[Alias("Name")]
+		[System.String]$InstanceName,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		[Amazon.EC2.Model.Instance]$EC2 = $null
+
+		if ($PSCmdlet.ParameterSetName -eq "Id")
+		{
+			Write-Verbose -Message "Getting instance by Id $InstanceId."
+			$Instances = Get-EC2Instance -InstanceId $InstanceId -ErrorAction SilentlyContinue @Splat
+		}
+		else
+		{
+			Write-Verbose -Message "Getting instance by Name $InstanceName."
+			[Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
+
+			# Filtering on tag values uses the "tag:" preface for the key name
+			$Filter.Name = "tag:Name"
+			$Filter.Value = $InstanceName
+                
+			# This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
+			# so save the error output and don't strongly type it
+			$Instances = Get-EC2Instance -Filter @($Filter) -ErrorAction SilentlyContinue @Splat
+		}
+
+		if ($Instances -ne $null)
+		{
+			if ($Instances.Instances.Count -gt 0)
+			{
+				if ($Instances.Instances.Count -eq 1)
+				{
+					$EC2 = $Instances.Instances | Select-Object -First 1
+
+					if ($EC2 -eq $null)
+					{
+						throw "No matching instances found."
+					}
+					else
+					{
+						Write-Output -InputObject $EC2
+					}
+				}
+				else
+				{
+					throw "Ambiguous match, more than 1 EC2 instance with the name $InstanceName found. Try instance id instead."
+				}
+			}
+			else
+			{
+				throw "No matching instances found."
+			}
+		}
+		else
+		{
+			throw "Nothing was returned by the get instance request."
+		}
+	}
+
+	End {
+	}
+}
+
+Function Set-EC2InstanceState {
+	<#
+		.SYNOPSIS
+			Changes the EC2 instance state to either START, STOP, TERMINATE, or RESTART the instance.
+
+		.DESCRIPTION
+			The cmdlet changes the state of the instance to achieve the desired end state if required. The cmdlet is idempotent, multiple calls to start an EC2 instance, for exampple, will succeed, but no action will be performed if the instance is already in the running state. If PassThru is specified, null will be returned if no action is taken.
+
+		.PARAMETER InstanceId
+			The id of the instance to get.
+
+		.PARAMETER InstanceName
+			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
+
+		.PARAMETER State
+			The action to perform on the EC2 instance, this is either STOP, START, RESTART, or TERMINATE. If RESTART is specified, then the Wait parameter has no effect.
+
+		.PARAMETER Timeout
+			The amount of time in seconds to wait for the EC2 to reach the desired state if the Wait parameter is specified. This defaults to 600.
+
+		.PARAMETER Wait
+			Specify to wait for the EC2 instance to reach the desired state.
+
+		.PARAMETER PassThru
+			Returns back the InstanceStateChange result or InstanceId if RESTART is specified.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Set-EC2InstanceState -InstanceId $EC2.InstanceId -State START -Wait 
+
+			Starts the specified EC2 instance and waits for it to reach the Running state.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			None or Amazon.EC2.Model.InstanceStateChange or System.String
+
+			A string is returned if RESTART is specified, otherwise an InstanceStateChange object is returned if PassThru is specified.
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/30/2017
+	#>
+	[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "HIGH")]
+	Param(
+		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
+		[Alias("Name")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceName,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceId,
+
+		[Parameter(Mandatory = $true)]
+		[ValidateSet("STOP", "START", "TERMINATE", "RESTART")]
+		[System.String]$State,
+
+		[Parameter()]
+		[Switch]$PassThru,
+
+		[Parameter()]
+		[Switch]$Wait,
+
+		[Parameter()]
+		[Switch]$Force,
+
+		[Parameter()]
+		[System.Int32]$Timeout = 600,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+		[System.Collections.Hashtable]$InstanceSplat = @{}
+
+		if ($PSCmdlet.ParameterSetName.Equals("Id"))
+		{
+			$InstanceSplat.Add("InstanceId", $InstanceId)
+		}
+		else
+		{
+			$InstanceSplat.Add("InstanceName", $InstanceName)
+		}
+
+		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
+		[Amazon.EC2.InstanceStateName]$DesiredState = $null
+		[Amazon.EC2.Model.InstanceStateChange]$Result = $null
+
+		Write-Verbose -Message "Current instance state: $($Instance.State.Name)."
+
+		$ConfirmMessage = "Are you sure you want to $State instance $($Instance.InstanceId)?"
+
+		$WhatIfDescription = "$State $($Instance.InstanceId)."
+		$ConfirmCaption = "Change Instance State"
+
+		if ($Force -or $PSCmdlet.ShouldProcess($WhatIfDescription, $ConfirmMessage, $ConfirmCaption))
+		{
+			switch ($State)
+			{
+				"STOP" {
+					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopped -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopping -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::ShuttingDown)
+					{
+						$Result = Stop-EC2Instance -InstanceId $Instance.InstanceId @Splat
+					}
+					else
+					{
+						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+					}
+
+					$DesiredState = [Amazon.EC2.InstanceStateName]::Stopped
+				
+					break
+				}
+				"START" {
+					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Running -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Pending)
+					{
+						$Result = Start-EC2Instance -InstanceId $Instance.InstanceId @Splat
+					}
+					else
+					{
+						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+					}
+
+					$DesiredState = [Amazon.EC2.InstanceStateName]::Running
+
+					break
+				}
+				"RESTART" {
+					$Result = Restart-EC2Instance -InstanceId $Instance.InstanceId -PassThru @Splat
+
+					$DesiredState = [Amazon.EC2.InstanceStateName]::Running
+
+					break
+				}
+				"TERMINATE" {
+					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Terminated)
+					{
+						$Result = Remove-EC2Instance -InstanceId $Instance.InstanceId -Force @Splat
+					}
+					else
+					{
+						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+					}
+
+					$DesiredState = [Amazon.EC2.InstanceStateName]::Terminated
+
+					break
+				}
+				default {
+					throw "Unexpected instance state provided: $State."
+				}
+			}
+
+			if ($Wait -and $State -ne "RESTART")
+			{
+				Write-Host -Object "Waiting for EC2 instance $($Instance.InstanceId) to $State..."
+
+				[System.Int32]$Increment = 5
+				[System.Int32]$Counter = 0
+
+				while ($Instance.State.Name -ne $DesiredState -and $Counter -lt $Timeout)
+				{
+					Write-Verbose -Message "Waiting for $($Instance.InstanceId) to $State."
+
+					Start-Sleep -Seconds $Increment
+					$Counter += $Increment
+
+					$Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+				}
+
+				if ($Counter -ge $Timeout)
+				{
+					throw "Timeout waiting for instance to $State."
+				}
+
+				Write-Verbose -Message "Successfully completed waiting for state change."
+			}
+
+			if ($PassThru)
+			{
+				Write-Output -InputObject $Result
+			}
+		}
+	}
+
+	End {
+	}
+}
+
+Function Get-EC2CurrentImageIds {
+	<#
+		.SYNOPSIS 
+			Gets the most current AMI image id for Windows and Amazon Linux, Debian, CentOS, Ubuntu, and SLES instances in each region.
+
+		.DESCRIPTION
+			The cmdlet retrieves the most current AMI image id for Windows Server 2012 through Windows Server 2019, Amazon Linux, Amazon Linux 2, Ubuntu 18.04, SLES 15, CentOS 7 and Debian 9. 
+
+            Mappings for ARM and x86 processors are provided as well as Linux images with .NET Core 2.1 pre-installed. 
+
+            The output is a	json formatted string that is targetted for usage in the Mappings section in an AWS Cloudformation script. This gives you an easy way to reference the most recent AMI id for an OS in CloudFormation as well as easily update that mapping element over time.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. 
+
+            If this parameter is specified, the AMI mappings are only returned for that region, otherwise mappings are returned for every region.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Get-EC2CurrentImageIds
+
+			Retrieves the AMI mappings for all included Operating Systems in every public region.
+
+		.EXAMPLE
+			Get-EC2CurrentImageIds -Region ([Amazon.RegionEndpoint]::UsEast1) -ProfileName myprodprofile
+
+			Gets the AMI mappings for all included Operating Systems in the us-east-1 region using the credentials in the "myprodprofile" profile.
+		
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.String
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/17/2019		
+	#>
+    [CmdletBinding()]
+    Param(
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+    Begin {
+        $OperatingSystems = @{
+			WindowsServer2019 = "Windows_Server-2019-English-Full-Base-*";
+            WindowsServer2016 = "Windows_Server-2016-English-Full-Base-*";
+            WindowsServer2012R2 = "Windows_Server-2012-R2_RTM-English-64Bit-Base-*";
+            WindowsServer2012 = "Windows_Server-2012-RTM-English-64Bit-Base-*";
+            AmazonLinux_x86_64 = "amzn-ami-hvm-*-x86_64-gp2";
+			AmazonLinux2_x86_64 = "amzn2-ami-hvm-*-x86_64-gp2";
+			AmazonLinux2_arm64 = "amzn2-ami-hvm-*-arm64-gp2";
+			AmazonLinux2_netcore21_x86_64 = "amzn2-ami-hvm-*-x86_64-gp2-dotnetcore-*";
+			Ubuntu1804_x86_64 = "ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-amd64-server-20??????";
+			Ubuntu1804_arm64 = "ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-arm64-server-20??????";
+			Ubuntu1804_netcore21_x86_64 = "ubuntu-bionic-18.04-amd64-server-*-dotnetcore-*"
+			SUSE15_x86_64 = "suse-sles-15-*-hvm-ssd-x86_64";
+			CentOS7_x86_64 = "CentOS Linux 7 x86_64 HVM EBS ENA*";
+			Debian9_x86_64 = "debian-stretch-hvm-x86_64-gp2*";
+        }
+    }
+
+    Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+        $Splat.Remove("Region")		 
+
+        if ($PSBoundParameters.ContainsKey("Region"))
+        {
+            [Amazon.PowerShell.Common.AWSRegion[]]$Regions = Get-AWSRegion -SystemName $Region.SystemName 
+        }
+        else
+        {
+            [Amazon.PowerShell.Common.AWSRegion[]]$Regions = Get-AWSRegion
+        }
+
+        [PSCustomObject]$Results = [PSCustomObject]@{}
+
+        $Jobs = @()
+        
+        foreach ($Item in $Regions)
+        {
+            Write-Verbose -Message "Starting background job for region $($Item.Region)."
+
+            $Job = Start-Job -Name $Item.Name -ScriptBlock {
+                Import-Module AWSPowerShell
+                $Region = $using:Item
+                $Splat = $using:Splat
+                $OS = $using:OperatingSystems
+                
+                [PSCustomObject]$RegionResults = [PSCustomObject]@{Name = $Region.Name; Region = $Region.Region}
+
+                $OS.GetEnumerator() | Sort-Object -Property Key | ForEach-Object {
+                    try
+                    {
+                        $Key = $_.Key
+                        [Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
+                        $Filter.Name = "name"
+                        $Filter.Value = $_.Value
+            
+                        $Id = [System.String]::Empty
+                        $Id = Get-EC2Image -Filter @($Filter) -Region $Region.Region -ErrorAction SilentlyContinue @Splat | Sort-Object -Property CreationDate -Descending | Select-Object -ExpandProperty ImageId -First 1
+
+                        if (-not [System.String]::IsNullOrEmpty($Id))
+                        {
+                            $RegionResults | Add-Member -MemberType NoteProperty -Name $_.Key -Value $Id
+                        }
+                    }
+                    catch [Exception]
+                    {
+                        Write-Warning -Message "Error processing $Key in $($Region.Region): $($_.Exception.Message)"
+                    }
+                }
+                
+                Write-Output -InputObject $RegionResults
+            }
+
+            $Jobs += $Job
+        }
+        
+        Write-Verbose -Message "Waiting on jobs to complete"
+
+        [PSCustomObject[]]$JobResults = $Jobs | Receive-Job -AutoRemoveJob -Wait | Select-Object -Property * -ExcludeProperty PSComputerName,RunspaceId,PSSourceJobInstanceId,PSShowComputerName
+        
+        foreach ($Item in ($JobResults | Sort-Object -Property Region))
+        {
+            $Results | Add-Member -Name $Item.Region -Value ($Item | Select-Object -Property * -ExcludeProperty Region) -MemberType NoteProperty
+        }
+
+        Write-Output -InputObject ($Results | ConvertTo-Json)
+    }
+
+	End {
+	}
+}
+
+#endregion
+
+#region IAM Functions
 
 Function Get-AWSAccountId {
 	<#
@@ -530,6 +1133,385 @@ Function Get-AWSIAMPrincipalId {
 	End {
 	}
 }
+
+Function Get-AWSFederationLogonUrl {
+	<#
+		.SYNOPSIS
+			Generates a temporary url that allows a logon to the AWS Management Console with an assumed role.
+
+		.DESCRIPTION
+			The cmdlet builds a url that can be used to logon to the AWS Management Console. First, the provided role is assumed using the specified credentials (or uses the default credentials).
+			Then, the cmdlet retrieves a federation signin token and then creates the login url. The provided credentials do not need to exist in the same account as the specified role, they just 
+			need permissions to be able to perform the sts:AssumeRole action for the provide role ARN.
+
+			The url can then be provided to a user to be able to access the management console with the credentials of the supplied role in the RoleArn parameter.
+
+		.PARAMETER RoleArn
+			The role in the account you want to assume and log into. This role must be assumed using long-term AWS credentials (not temporary credentials). This is the role and permissions the user will have when accessing the management console. The user calling this cmdlet must have permisions to assume that role in order for the call to succeed.
+
+		.PARAMETER Duration
+			How long the assumed role credentials are good for between 900 and 3600 seconds. Regardless of what value is specified, the resulting Url is always valid for 15 minutes.
+
+		.PARAMETER Issuer
+			The url of your custom authentication system. This will default to https://<AWS Account Id>.signin.aws.amazon.com.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Get-AWSFederationLogonUrl -RoleArn "arn:aws:iam::123456789012:role/AdministratorRole" -ProfileName mydev
+			
+			Gets the AWS management console signin url for the AdministratorRole in the 123456789012 account. The credentials stored in the mydev profile are used to call AssumeRole on the provided role and generate the federated logon url.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.String
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/17/2019
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true)]
+		[System.String]$RoleArn,
+
+		[Parameter()]
+		[ValidateRange(900, 3600)]
+		[System.Int32]$Duration = 3600,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Issuer = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+		$Destination = [System.Net.WebUtility]::UrlEncode("https://console.aws.amazon.com")
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		# Get caller identity
+		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @Splat
+
+		# Create the session name from the identity
+		$SessionName = "$($Identity.Account)-$($Identity.UserId)-$($Identity.Arn.Split("/")[-1])"
+		$SessionName = $SessionName.Substring(0, [System.Math]::Min(64, $SessionName.Length)) -replace "[^\\w +=,.@-]*",""
+		
+		# Assume the role in the remote account
+		[Amazon.SecurityToken.Model.AssumeRoleResponse]$Role = Use-STSRole -DurationInSeconds $Duration -RoleSessionName $SessionName -RoleArn $RoleArn @Splat
+
+		# Form the url to to get the signin token
+		$Url = "$script:FederationUrl`?Action=getSigninToken&SessionType=json&Session={`"sessionId`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.AccessKeyId))`",`"sessionKey`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SecretAccessKey))`",`"sessionToken`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SessionToken))`"}"
+
+		<# Get the token, it's in the form of
+		{
+			"SiginToken" : "UniqueStringHere"
+		}
+		#>
+		[PSCustomObject]$Response = Invoke-WebRequest -Uri $Url -Method Get | Select-Object -ExpandProperty Content | ConvertFrom-Json
+
+		# Set the issuer if it wasn't provided by the user
+		if ([System.String]::IsNullOrEmpty($Issuer))
+		{
+			$Issuer = "https://$($Identity.Account).signin.aws.amazon.com"
+		}
+
+		$Issuer = [System.Net.WebUtility]::UrlEncode($Issuer)		
+		$Token = [System.Net.WebUtility]::UrlEncode($Response.SigninToken)
+		$Action = "login"
+
+		# Create the signin url, it's valid for 15 minutes regardless of the duration of the assumed role
+		[System.String]$Signin = "$script:FederationUrl`?Action=$Action&Issuer=$Issuer&Destination=$Destination&SigninToken=$Token"
+
+		Write-Output -InputObject $Signin
+	}
+
+	End {
+	}
+}
+
+Function Get-AWSIAMRoleSummary {
+	<#
+		.SYNOPSIS
+			Retrieves a summary about the specified role(s) or all roles in an account.
+
+		.DESCRIPTION
+			This cmdlet retrieves details about specified roles or all roles in an account. The details include all inline and managed policy documents,
+			the assume role policy document, name, arn, created date, path, etc. If a specified role is not found, the cmdlet produces a warning, but
+			can throw an exception if the -ErrorAction parameter is set to stop.
+
+		.PARAMETER RoleNames
+			The name of a role or multiple roles to retrieve a summary of. If this parameter is not specified, all roles in the account are retrieved.
+
+		.PARAMETER PathPrefix
+			The path prefix for filtering the IAM roles processed. For example, the prefix /application_abc/component_xyz/ gets all roles whose path starts with /application_abc/component_xyz/.
+
+			If it is not included, it defaults to a slash (/), listing all roles.
+
+        .PARAMETER AsJson
+            Returns the results as a JSON string instead of a PSCustomObject array.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE 
+			$IAMRoles = Get-AWSIAMRoleSummary -ProfileName "my-lab"
+
+			Gets a summary of all the IAM roles and their policies in the account specified by the my-lab credentials profile.
+
+		.EXAMPLE
+			Get-AWSIAMRoleSummary -PathPrefix /caa-roles/ -ProfileName "my-lab"
+
+			Gets a summary of the IAM roles and their policies in the /caa-roles/ path inside the account specified by the my-lab credentials profile.
+
+		.EXAMPLE 
+			Get-AWSIAMRoleSummary -RoleNames "PowerUserRole","AdministratorRole" -ProfileName "my-lab"
+
+			Gets a summary of the PowerUserRole and AdministratorRole IAM roles and their policies inside the account specified by the my-lab credentials profile.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject[], System.String
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/18/2019
+	#>
+	[CmdletBinding(DefaultParameterSetName = "Name")]
+	[OutputType([System.Management.Automation.PSCustomObject[]], [System.String])]
+	Param(
+		[Parameter(ParameterSetName = "Name")]
+		[ValidateNotNullOrEmpty()]
+		[System.String[]]$RoleNames,
+
+		[Parameter(ParameterSetName = "Prefix")]
+		[ValidateNotNullOrEmpty()]
+		[ValidatePattern("(?:^\/$|(?:\/\S+\/)+)")]
+		[System.String]$PathPrefix = "/",
+
+        [Parameter()]
+        [Switch]$AsJson,
+
+		[Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		
+		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
+		$AccountId = $Identity.Account
+
+		[PSCustomObject[]]$AccountRoles = @()
+
+        [Amazon.IdentityManagement.Model.Role[]]$Roles
+
+		if (-not $PSBoundParameters.ContainsKey("RoleNames") -or $RoleNames.Length -eq 0)
+		{
+			# Path prefix defaults to "/", which lists all roles
+			$Roles = Get-IAMRoleList -PathPrefix $PathPrefix @SourceSplat
+		}
+        else
+        {
+            foreach ($Name in $RoleNames)
+            {
+                [Amazon.IdentityManagement.Model.Role]$Role = Get-IAMRole -RoleName $Name @SourceSplat
+                $Roles += $Role
+            }
+        }
+		
+		$i = 0
+
+		foreach ($IAMRole in $Roles)
+		{
+			$i++
+			$Percent = [System.Math]::Round(($i / $Roles.Length) * 100, 2)
+			Write-Progress -Activity "Processing Roles" -Status "Processing $i of $($Roles.Length) IAM Roles, $Percent% Complete" -PercentComplete $Percent
+
+            [System.Collections.Hashtable]$Inline = [System.Collections.Hashtable]@{}
+            [System.Collections.Hashtable]$Attached = [System.Collections.Hashtable]@{}
+
+			try
+			{
+				[System.String[]]$InlinePolicies = Get-IAMRolePolicyList -RoleName $IAMRole.RoleName @SourceSplat
+
+				foreach ($InlinePolicy in $InlinePolicies)
+				{
+					[Amazon.IdentityManagement.Model.GetRolePolicyResponse]$GetPolicyResult = Get-IAMRolePolicy -PolicyName $InlinePolicy -RoleName $IAMRole.RoleName @SourceSplat
+                    $Inline.Add($GetPolicyResult.PolicyName, (ConvertFrom-Json -InputObject ([System.Net.WebUtility]::UrlDecode($GetPolicyResult.PolicyDocument))))
+				}
+
+				[Amazon.IdentityManagement.Model.AttachedPolicyType[]]$AttachedPolicies = Get-IAMAttachedRolePolicyList -RoleName $IAMRole.RoleName @SourceSplat
+
+				foreach ($AttachedPolicy in $AttachedPolicies)
+				{
+					[Amazon.IdentityManagement.Model.ManagedPolicy]$ManagedPolicy = Get-IAMPolicy -PolicyArn $AttachedPolicy.PolicyArn @SourceSplat
+					[Amazon.IdentityManagement.Model.PolicyVersion]$GetManagedPolicyResult = Get-IAMPolicyVersion -PolicyArn $ManagedPolicy.Arn -VersionId $ManagedPolicy.DefaultVersionId @SourceSplat
+
+					$Attached.Add($ManagedPolicy.Arn, (ConvertFrom-Json -InputObject ([System.Net.WebUtility]::UrlDecode($GetManagedPolicyResult.Document))))
+				}
+
+				$AccountRoles += [PSCustomObject]@{
+					RoleId = $IAMRole.RoleId;
+					RoleName = $IAMRole.RoleName;
+					Arn = $IAMRole.Arn;
+					AccountId = $AccountId;
+					CreateDate = $IAMRole.CreateDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+					Path = $IAMRole.Path;
+					AssumeRolePolicyDocument = ConvertFrom-Json -InputObject ([System.Net.WebUtility]::UrlDecode($IAMRole.AssumeRolePolicyDocument))
+					InlinePolicies = $Inline;
+                    AttachedPolicies = $Attached;
+				}
+			}
+			catch [System.InvalidOperationException]
+			{
+				if ($_.Exception.InnerException -ne $null -and $_.Exception.InnerException -is [Amazon.IdentityManagement.Model.NoSuchEntityException])
+				{
+					if ($ErrorActionPreference -ne [System.Management.Automation.ActionPreference]::Stop)
+					{
+						Write-Warning -Message "$($_.Exception.InnerException.Message)"
+					}
+					else
+					{
+						throw $_.Exception
+					}
+				}
+				else
+				{
+					throw $_.Exception
+				}
+			}
+		}
+
+		Write-Progress -Activity "Processing Roles" -Completed
+
+        if ($AsJson)
+        {
+            ConvertTo-Json -InputObject $AccountRoles -Depth 5
+        }
+        else
+        {
+		    Write-Output -InputObject $AccountRoles
+        }
+	}
+
+	End {
+	}
+}
+
+#endregion
+
+#region EBS Functions
 
 Function New-EBSAutomatedSnapshot {
 	<#
@@ -1009,6 +1991,10 @@ Function New-EBSAutomatedSnapshot {
 	}
 }
 
+#endregion
+
+#region Splat Functions
+
 Function New-AWSSplat {
 	<#
 		.SYNOPSIS
@@ -1338,718 +2324,31 @@ Function New-AWSUtilitiesSplat {
 	}
 }
 
-Function Copy-EBSVolume {
-    <#
-        .SYNOPSIS
-			Copies EBS volumes from a source to a destination.
+#endregion
 
-		.DESCRIPTION
-			This cmdlet creates EBS Volume snaphshots of a specified EBS volume, or volumes attached to an instance and then creates new EBS volumes
-			from those snapshots.
+#region KMS Functions
 
-			If a destination EC2 instance is not specified either by Id or name, the volumes are created in the destination region, but are not
-			attached to anything and the cmdlet will return details about the volumes.
-
-			The volumes are attached to the first available device on the EC2 instance starting at xvdf and will attach until xvdp.
-
-		.PARAMETER SourceInstanceId
-			The Id of the source EC2 instance to copy EBS volumes from.
-
-		.PARAMETER SourceEBSVolumeId
-			The Id of the source EBS volume to copy.
-
-		.PARAMETER SourceInstanceName
-			The name of the source EC2 instance to copy EBS volumes from. This matches against the Name tag value.
-
-		.PARAMETER DestinationInstanceId
-			The Id of the EC2 instance to attach the new volumes to.
-
-		.PARAMETER DestinationInstanceName
-			The name of the destination EC2 instance to attach the new volumes to. This matches against the Name tag value.
-
-		.PARAMETER OnlyRootDevice
-			Only copies the root/boot volume from the source EC2 instance.
-
-		.PARAMETER DeleteSnapshots
-			The intermediary snapshots will be deleted. If this is not specified, they will be left.
-
-		.PARAMETER DestinationRegion
-			The region the new volumes should be created in. This must be specified if the destination instance
-			is in a different region. This parameter defaults to the source region.
-
-		.PARAMETER AvailabilityZone
-			The AZ in which the new volume(s) should be created. If this is not specified, the AZ is determined by the AZ the source volume
-			is in if the new volume is being created in the same region. If the volume is being created in a different region, the AZ of 
-			the indicated destination EC2 instance is used. If a destination EC2 instance isn't specified, then the first available AZ of the
-			region will be used.
-
-		.PARAMETER Timeout
-			The amount of time in seconds to wait for each snapshot and volume to be created. This defaults to 900 seconds (15 minutes).
-
-		.PARAMETER KmsKeyId
-			If you specify this, the resulting EBS volumes will be encrypted using this KMS key. You don't need to specify the EncryptNewVolumes parameter if you provide this one.
-
-		.PARAMETER EncryptNewVolumes
-			This will encrypt the resulting volumes using the default AWS KMS key.	
-
-		.PARAMETER VolumeType
-			You can specify a single volume type for all newly created volumes. If this parameter is not specified, the source volume attributes are used to create the new volume, including the number of provisioned IOPS.
-
-		.PARAMETER Iops
-			Only valid for Provisioned IOPS SSD volumes when you specify Io1 for the VolumeType parameter. The number of I/O operations per second (IOPS) to provision for the volume, with a maximum ratio of 50 IOPS/GiB. Constraint: Range is 100 to 20000 for Provisioned IOPS SSD volumes.
-
-		.PARAMETER VolumeSize
-			If the source is an EBS Volume Id, or the OnlyRootDevice parameter is specified, a new Volume size can be specified for the resulting volume in GiBs. The size must be greater than or equal to the source.
-
-			Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
-
-		.PARAMETER CopyTags 
-			Specify this to copy the current tag values from the source volume(s) to the destination volume(s) and intermediate EBS snapshots.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DeleteSnapshots -ProfileName mycredprofile -Verbose -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
-			
-			Copies the EBS volumes from server1 in the region specified in the mycredprofile AWS credential profile as the default region to us-east-2. 
-
-		.EXAMPLE
-			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DestinationInstanceName server2 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
-			
-			Copies the EBS volume(s) from server1 in us-west-2 and attaches them to server2 in us-east-2. 
-
-		.EXAMPLE
-			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
-			
-			Copies the EBS volume(s) from server1 in us-west-2 to us-east-2. The new volumes are unattached.
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			Amazon.EC2.Model.Volume[]
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 1/14/2019
-    #>
-    [CmdletBinding()]
-    Param(
-		[Parameter(ParameterSetName = "SourceByInstanceId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceId", Mandatory = $true)]
-        [System.String]$SourceInstanceId,
-
-		[Parameter(ParameterSetName = "SourceByVolumeId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByVolumeId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByVolumeId", Mandatory = $true)]
-        [System.String]$SourceEBSVolumeId,
-
-		[Parameter(ParameterSetName = "SourceByInstanceName", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceName", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceName", Mandatory = $true)]
-        [System.String]$SourceInstanceName,
-
-        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByVolumeId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceName", Mandatory = $true)]
-        [System.String]$DestinationInstaceId,
-
-        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByVolumeId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceName", Mandatory = $true)]
-        [System.String]$DestinationInstanceName,
-
-        [Parameter()]
-        [Switch]$OnlyRootDevice,
-
-        [Parameter()]
-        [switch]$DeleteSnapshots,
-
-        [Parameter()]
-		[ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileName = [System.String]::Empty,
-
-        [Parameter()]
-		[ValidateNotNull()]
-        [System.String]$AccessKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SecretKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SessionToken = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [Amazon.Runtime.AWSCredentials]$Credential,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileLocation = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$AvailabilityZone = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.RegionEndpoint]$DestinationRegion,
-
-		[Parameter()]
-		[System.UInt32]$Timeout = 900,
-
-		[Parameter()]
-		[Switch]$EncryptNewVolumes,
-
-		[Parameter()]
-		[Amazon.EC2.VolumeType]$VolumeType,
-
-		[Parameter()]
-		[ValidateRange(100, 20000)]
-		[System.Int32]$Iops,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$KmsKeyId = [System.String]::Empty,
-
-		[Parameter()]
-		[Switch]$CopyTags
-    )
-
-	DynamicParam 
-	{
-		[System.Management.Automation.RuntimeDefinedParameterDictionary]$ParamDictionary = New-Object -TypeName System.Management.Automation.RuntimeDefinedParameterDictionary
-
-		# If we're only targetting a single EBS volume, we can specify a new size
-		if ($PSBoundParameters.ContainsKey("SourceEBSVolumeId") -or $PSBoundParameters.ContainsKey("OnlyRootDevice"))
-		{
-			New-DynamicParameter -Name "VolumeSize" -Type ([System.Int32]) -ValidateRange @(1, 16384) -RuntimeParameterDictionary $ParamDictionary | Out-Null
-		}
-
-		Write-Output -InputObject $ParamDictionary
-	}
-
-    Begin {
-    }
-
-    Process {
-		if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1 -and -not $PSBoundParameters.ContainsKey("Iops"))
-		{
-			throw "You must specify a number of IOPS if the destination volumes are of type Io1."			
-		}
-
-		# Map the common AWS parameters
-		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		[System.Collections.Hashtable]$SourceAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
-
-		if (-not $PSBoundParameters.ContainsKey("Region"))
-		{
-			$Region = [Amazon.RegionEndpoint]::GetBySystemName($SourceSplat.Region)
-		}
-		
-		# Map the common parameters, but with the destination Region
-		[System.Collections.Hashtable]$DestinationSplat = New-AWSSplat -Region $DestinationRegion -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation
-		[System.Collections.Hashtable]$DestinationAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $DestinationSplat
-
-		# If the user did not specify a destination region, use the source region
-		# which could be specified, or be the default
-		if (-not $PSBoundParameters.ContainsKey("DestinationRegion"))
-		{
-			$DestinationSplat.Region = $SourceSplat.Region
-			$DestinationAWSUtilitiesSplat.Region = $SourceAWSUtilitiesSplat.Region
-			$DestinationRegion = [Amazon.RegionEndpoint]::GetBySystemName($DestinationSplat.Region)
-		}
-
-		# The first step is to get the volume Ids attached to the instance we are trying to copy data from
-        [Amazon.EC2.Model.Volume[]]$EBSVolumes = @()
-
-        switch -Wildcard ($PSCmdlet.ParameterSetName) {
-            "*SourceByInstanceName" {
-
-				[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId -Name $SourceInstanceName @SourceAWSUtilitiesSplat
-
-				if ($Instance -ne $null)
-				{
-					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
-					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
-					{
-						$AvailabilityZone = $Instance.Placement.AvailabilityZone
-						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
-					}
-
-					if ($OnlyRootDevice)
-					{
-						$EBSVolumes = $Instance.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | Select-Object -First 1 -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId	| Get-EC2Volume @SourceSplat
-					}
-					else
-					{
-						$EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
-					}                        
-				}
-
-                break
-            }
-            "*SourceByInstanceId" {
-                
-                # This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
-                # so save the error output and don't strongly type it
-                [Amazon.EC2.Model.Instance]$Instance  = Get-EC2InstanceByNameOrId -InstanceId $SourceInstanceId @SourceAWSUtilitiesSplat
-
-                if ($Instance -ne $null)
-                {
-					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
-					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
-					{
-						$AvailabilityZone = $Instance.Placement.AvailabilityZone
-						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
-					}
-
-                    if ($OnlyRootDevice)
-                    {
-						$EBSVolumes = $Instance.BlockDeviceMappings | `
-							Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | `
-							Select-Object -ExpandProperty Ebs | `
-							Select-Object -First 1 -ExpandProperty VolumeId	| `
-							Get-EC2Volume @SourceSplat
-                    }
-                    else
-                    {
-                        $EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
-                    }                       
-                }
-
-                break
-            }
-            "*SourceByVolumeId" {
-				# This check just ensures the EC2 EBS volume exists
-
-                [Amazon.EC2.Model.Volume]$Volume = Get-EC2Volume -VolumeId $SourceEBSVolumeId @SourceSplat
-                
-                if ($Volume -ne $null)
-                {
-                    $EBSVolumes = @($Volume)
-
-				    # Only update the AZ if a specific one wasn't specified and we're not moving cross region
-					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
-				    {
-					    $AvailabilityZone = $Volume.AvailabilityZone
-						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
-				    }
-                }
-                else
-                {
-                    throw "[ERROR] Could not find a volume matching $SourceEBSVolumeId"
-                }
-
-                break
-            }
-            default {
-                throw "Could not determine parameter set name"
-            }
-        }
-
-		# Test this here so we can throw early and not go through creating snapshots before we find this out
-		# The dynamic param VolumeSize should only be added if there is 1 source volume, but
-		# but let's make sure
-		# Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
-		if ($PSBoundParameters.ContainsKey("VolumeSize") -and $EBSVolumes.Length -eq 1)
-		{
-			[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
-
-			foreach ($Vol in $EBSVolumes)
-			{
-				if ($Size -lt $Vol.Size)
-				{
-					throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($Vol.Size) GiB for $($Vol.VolumeId)."
-				}
-
-				# We don't need to check the other types since they all use the same upper limit, which was checked by the 
-				# parameter validation, and the value can't be less than the minimum since the existing volumes must comply
-				# with that minimum
-				if ($Vol.VolumeType -eq [Amazon.EC2.VolumeType]::Standard -and $Size -gt 1024)
-				{
-					throw "The specified size, $Size GiB, is greater than 1024, the maximum size for the Standard volume type."				
-				}
-			}
-		}
-
-		# Retrieve the destination EC2 instance
-		# This needs to come after the instance retrieval because it may
-		# update the destination AZ
-        [Amazon.EC2.Model.Instance]$Destination = $null
-
-        switch -Wildcard ($PSCmdlet.ParameterSetName)
-        {
-            "DestinationByName*" {
-				$Destination = Get-EC2InstanceByNameOrId -Name $DestinationInstanceName @DestinationAWSUtilitiesSplat
-				$AvailabilityZone = $Destination.Placement.AvailabilityZone
-
-                break
-            }
-            "DestinationById*" {
-                $Destination = Get-EC2InstanceByNameOrId -InstanceId $DestinationInstaceId @DestinationAWSUtilitiesSplat
-				$AvailabilityZone = $Destination.Placement.AvailabilityZone
-
-                break
-            }
-            default {
-                Write-Verbose -Message "A destination is not provided, so just creating the snapshots and volumes"
-
-				# If the AZ hasn't been specified previously because this is a cross region
-				# move, select a default one for the destination region
-                if ([System.String]::IsNullOrEmpty($AvailabilityZone))
-                {
-                    $AvailabilityZone = Get-EC2AvailabilityZone -Region $DestinationRegion.SystemName | Where-Object {$_.State -eq [Amazon.EC2.AvailabilityZoneState]::Available} | Select-Object -First 1 -ExpandProperty ZoneName
-                    Write-Verbose -Message "Using a default AZ in the destination region since a destination instance and AZ were not specified: $AvailabilityZone"
-                }
-            }
-        }
-
-		# This will be used in the snapshot description
-		[System.String]$Purpose = [System.String]::Empty
-
-		if ($Destination -ne $null)
-		{
-			$Purpose = $Destination.InstanceId
-		}
-		else
-		{
-			$Purpose = $DestinationRegion.SystemName
-		}
-
-		# Create the snapshots at the source
-
-        [Amazon.EC2.Model.Snapshot[]]$Snapshots = $EBSVolumes | ForEach-Object {
-			[Amazon.EC2.Model.Snapshot]$Snap = New-EC2Snapshot -VolumeId $_.VolumeId @SourceSplat -Description "TEMPORARY for $Purpose"
-
-			if ($CopyTags)
-			{
-				New-EC2Tag -Resource $Snap.SnapshotId -Tag $_.Tags @SourceSplat
-			}
-
-			Write-Output -InputObject $Snap
-		}
-
-		# Using a try here so the finally step will always delete the snapshots if specified
-		try
-		{
-			# Reset the counter for the next loop
-			$Counter = 0
-
-			# While all of the snapshots have not completed, wait
-			while (($Snapshots | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
-			{
-				$Completed = (($Snapshots | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $Snapshots.Length) * 100
-				Write-Progress -Activity "Creating snapshots" -Status "$Completed% Complete:" -PercentComplete $Completed
-
-				# Update their statuses
-				for ($i = 0; $i -lt $Snapshots.Length; $i++)
-				{
-					if ($Snapshots[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
-					{
-						Write-Verbose -Message "Waiting on snapshot $($Snapshots[$i].SnapshotId) to complete, currently at $($Snapshots[$i].Progress) in state $($Snapshots[$i].State)"
-						$Snapshots[$i] = Get-EC2Snapshot -SnapshotId $Snapshots[$i].SnapshotId @SourceSplat
-					}
-				}
-
-				Start-Sleep -Seconds 1
-				$Counter++
-			}
-
-			Write-Progress -Completed -Activity "Creating snapshots"
-
-			if ($Counter -ge $Timeout)
-			{
-				throw "Timeout waiting for snapshots to be created."
-			}
-			else
-			{
-				Write-Verbose -Message "All of the snapshots have completed."
-			}
-
-			[Amazon.EC2.Model.Snapshot[]]$SnapshotsToCreate = @()
-
-			# Reset the counter for the next loop
-			$Counter = 0
-
-			# If this is a cross region move, copy the snapshots over, or if we are going to encrypt the new volumes, create copies
-			if (($DestinationRegion.SystemName -ne $Region.SystemName) -or $EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))
-			{
-				Write-Verbose -Message "Copying snapshots from $($SourceSplat.Region) to $($DestinationSplat.Region) using encryption: $($EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))"
-
-				# Create the encryption splat
-				[System.Collections.Hashtable]$EncryptionSplat = @{}
-
-				if ($EncryptNewVolumes)
-				{
-					$EncryptionSplat.Add("Encrypted", $true)
-				}
-										  
-				if (-not [System.String]::IsNullOrEmpty($KmsKeyId))
-				{
-					$EncryptionSplat.Add("KmsKeyId", $KmsKeyId)
-				}
-
-				# Copy the Snapshots and get the new copied snapshot objects back
-				$SnapshotsToCreate = $Snapshots | ForEach-Object {
-					[System.String]$Id = Copy-EC2Snapshot -SourceSnapshotId $_.SnapshotId -SourceRegion $SourceSplat.Region -Description "COPY OF TEMPORARY for $Purpose" @DestinationSplat @EncryptionSplat
-					[Amazon.EC2.Model.Snapshot]$Snap = Get-EC2Snapshot -SnapshotId $Id @DestinationSplat
-					$Snap.VolumeId = $_.VolumeId
-
-					if ($CopyTags)
-					{
-						New-EC2Tag -Resource $Id -Tag ($EBSVolumes | Where-Object {$_.VolumeId -eq $Snap.VolumeId } | Select-Object -First 1 -ExpandProperty Tags) @DestinationSplat
-					}
-
-					Write-Output -InputObject $Snap
-				}
-
-				# While all of the snapshots have not completed, wait
-				while (($SnapshotsToCreate | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
-				{
-					$Completed = (($SnapshotsToCreate | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $SnapshotsToCreate.Length) * 100
-					Write-Progress -Activity "Creating snapshot copies" -Status "$Completed% Complete:" -PercentComplete $Completed
-
-					# Update their statuses
-					for ($i = 0; $i -lt $SnapshotsToCreate.Length; $i++)
-					{
-						if ($SnapshotsToCreate[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
-						{
-							# This will ensure we have a VolumeId later that we can check on
-							# to compare the copied snapshot with the original volume
-							$TempVolId = $SnapshotsToCreate[$i].VolumeId
-							Write-Verbose -Message "Waiting on snapshot $($SnapshotsToCreate[$i].SnapshotId) copy to complete, currently at $($SnapshotsToCreate[$i].Progress) in state $($SnapshotsToCreate[$i].State)"
-							$SnapshotsToCreate[$i] = Get-EC2Snapshot -SnapshotId $SnapshotsToCreate[$i].SnapshotId @DestinationSplat
-							$SnapshotsToCreate[$i].VolumeId = $TempVolId
-						}
-					}
-
-					Start-Sleep -Seconds 1
-					$Counter++
-				}
-
-				Write-Progress -Completed -Activity "Creating snapshots"
-
-				if ($Counter -ge $Timeout)
-				{
-					throw "Timeout waiting for snapshots to be copied to new region."
-				}
-				else
-				{
-					Write-Verbose -Message "All of the copied snapshots have completed."
-				}
-			}
-			else
-			{
-				# Not a cross region move, so assign the current snapshots to the variable
-				# that we will evaluate to create the volumes from
-
-				$SnapshotsToCreate = $Snapshots
-
-				# Empty the original array to be able to identify what needs
-				# to be deleted later, otherwise the finally block will try to delete the 
-				# same snapshots twice
-				$Snapshots = @()
-			}
-
-			# Create the new volumes from the newly created snapshots
-			# The destination splat will either have the new region if it was specified or will be the same as the source region
-			# The AZ was determined from the source instance if the source and destination region were the same, otherwise
-			# the AZ was selected from the Destination instance, if one was provided, if it wasn't, then a default AZ for the new region
-			# was selected
-			[Amazon.EC2.Model.Volume[]]$NewVolumes = $SnapshotsToCreate | ForEach-Object {
-				[System.Collections.Hashtable]$NewVolumeSplat = @{}
-
-				# Make sure we use the right volume type for the destination
-				if ($PSBoundParameters.ContainsKey("VolumeType"))
-				{
-					$NewVolumeSplat.Add("VolumeType", $VolumeType)
-
-					if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
-					{
-						# Make sure the maximum of 50 IOPS to GiB isn't exceeded
-						if ($Iops -le ($_.VolumeSize * 50))
-						{
-							$NewVolumeSplat.Add("Iops", $Iops)
-						}
-						else
-						{
-							Write-Warning -Message "The desired IOPS for the snapshot from $($_.VolumeId) exceed the maximum ratio of 50 IOPS / GiB. This has been throttled to $([System.Math]::Floor($_.VolumeSize) * 50)"
-							$NewVolumeSplat.Add("Iops", [System.Math]::Floor($_.VolumeSize) * 50)
-						}
-					}
-				}
-				else
-				{
-					Write-Verbose -Message "Retrieving source volume attributes for volume $($_.VolumeId)."
-					[Amazon.EC2.Model.Volume]$SourceVolume = $EBSVolumes | Where-Object {$_.VolumeId -eq $_.VolumeId} | Select-Object -First 1
-					$NewVolumeSplat.Add("VolumeType", $SourceVolume.VolumeType)
-
-					if ($SourceVolume.VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
-					{
-						$NewVolumeSplat.Add("Iops", $SourceVolume.Iops)
-					}
-				}
-
-				# The dynamic param VolumeSize should only be added if there is 1 source, but
-				# but let's make sure. We also validated earlier than if there was 1 source and this
-				# parameter was specified, that it wasn't smaller than the current volume size
-				if ($PSBoundParameters.ContainsKey("VolumeSize") -and $SnapshotsToCreate.Length -eq 1)
-				{
-					[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
-
-					# This check is probably unnecessary here since we checked earlier, but can't hurt
-					if ($Size -ge $_.VolumeSize)
-					{
-						$NewVolumeSplat.Add("Size", $Size)
-					}
-					else
-					{
-						throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($_.VolumeSize) GiB."
-					}
-				}
-
-				[Amazon.EC2.Model.Volume]$NewVol = New-EC2Volume -SnapshotId $_.SnapshotId -AvailabilityZone $AvailabilityZone @DestinationSplat @NewVolumeSplat
-
-				if ($CopyTags)
-				{
-					[Amazon.EC2.Model.TagDescription[]]$Tags = Get-EC2Tag -Filter @{Name="resource-id"; Value=$NewVol.VolumeId} @DestinationSplat
-					New-EC2Tag -Resource $NewVol.VolumeId -Tag $Tags @DestinationSplat
-				}
-
-				Write-Output -InputObject $NewVol
-			}
-
-			# Reset the counter for the next loop
-			$Counter = 0
-
-			# Wait for the new volumes to become available before we try to attach them
-			while (($NewVolumes | Where-Object {$_.State -ne [Amazon.EC2.VolumeState]::Available}) -ne $null -and $Counter -lt $Timeout)
-			{
-				$Completed = (($NewVolumes | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Length / $NewVolumes.Length) * 100
-				Write-Progress -Activity "Creating volumes" -Status "$Completed% Complete:" -PercentComplete $Completed
-			
-				for ($i = 0; $i -lt $NewVolumes.Length; $i++)
-				{
-					if ($NewVolumes[$i].State -ne [Amazon.EC2.VolumeState]::Available)
-					{
-						Write-Verbose -Message "Waiting on volume $($NewVolumes[$i].VolumeId) to become available, currently $($NewVolumes[$i].State)"
-						$NewVolumes[$i] = Get-EC2Volume -VolumeId $NewVolumes[$i].VolumeId @DestinationSplat
-					}
-				}
-
-				Start-Sleep -Seconds 1
-				$Counter++
-			}
-
-			Write-Progress -Completed -Activity "Creating volumes"
-
-			if ($Counter -ge $Timeout)
-			{
-				throw "Timeout waiting for volumes to be created."
-			}
-			else
-			{
-				Write-Verbose -Message "All of the new volumes are available."
-			}
-
-			# Check if a destination instance was specified
-			if ($Destination -ne $null)
-			{
-				Write-Verbose -Message "Mounting volumes."
-				Mount-EBSVolumes -VolumeIds ($NewVolumes | Select-Object -ExpandProperty VolumeId) -NextAvailableDevice -Instance $Destination @DestinationAWSUtilitiesSplat
-			}
-			elseif ($PSCmdlet.ParameterSetName -like ("DestinationBy*"))
-			{
-				# This means a destination instance was specified, but we didn't
-				# find it in the Get-EC2Instance cmdlet
-				Write-Warning -Message "[ERROR] Could not find the destination instance"
-			}
-
-            Write-Output -InputObject $NewVolumes					
-		}
-		finally
-		{		
-			if ($DeleteSnapshots)
-			{
-				# Delete the original source Region snapshots if there are any
-				if ($Snapshots -ne $null -and $Snapshots.Length -gt 0)
-				{
-					Write-Verbose -Message "Deleting snapshots $([System.String]::Join(",", ($Snapshots | Select-Object -ExpandProperty SnapshotId)))"
-					$Snapshots | Remove-EC2Snapshot @SourceSplat -Confirm:$false
-				}
-
-				if ($SnapshotsToCreate -ne $null -and $SnapshotsToCreate.Length -gt 0)
-				{
-					Write-Verbose -Message "Deleting snapshots $([System.String]::Join(",", ($SnapshotsToCreate | Select-Object -ExpandProperty SnapshotId)))"
-					$SnapshotsToCreate | Remove-EC2Snapshot @DestinationSplat -Confirm:$false
-				}
-			}
-		}
-    }
-
-    End {
-    }
-}
-
-Function Mount-EBSVolumes {
+Function Invoke-AWSKMSEncryptString {
 	<#
 		.SYNOPSIS
-			Mounts a set of available EBS volumes to an instance.
+			Encrypts a plain text string with an AWS KMS key.
 
 		.DESCRIPTION
-			The cmdlet can mount one to many available EBS volumes to an EC2 instance. The destination instance
-			can be provided as an EC2 object or by instance id. The mount point device can be specified directly
-			or the next available device is used. If the device is specified directly and is in use, or if multiple
-			volumes are specified, the provided device is used as a starting point to find the next available device.
+			The cmdlet takes a plain text string and encrypts it with an AWS KMS key and returns back a Base 64 encoded string of the encrypted plain text.
 
-		.PARAMETER VolumeIds
-			The Ids of the volumes to attach. The must be in an available status.
+			Optionally, an Encryption Context hash table can be provided to include with the encrypted string.
 
-		.PARAMETER NextAvailableDevice
-			Specifies that the cmdlet will find the next available device between xvdf and xvdp.
+		.PARAMETER InputObject
+			The string to encrypt.
 
-		.PARAMETER Device
-			Specify the device that the volume will be attached at. If multiple volumes are specified, this is the starting
-			point to find the next available device for each.
+		.PARAMETER Key
+			The Key Id (a string version of a GUID) or the Key alias.
 
-		.PARAMETER InstanceId
-			The id of the instance to attach the volumes to.
+		.PARAMETER EncryptionContext
+			Name-value pair in a Hashtable that specifies the encryption context to be used for authenticated encryption. If used here, the same value must be supplied to the Decrypt API or decryption will fail.
 
-		.PARAMETER Instance
-			The Amazon.EC2.Model.Instance object to attach the volumes to.
+		.PARAMETER Encoding
+			The encoding to use to convert the text to bytes. This defaults to UTF-8.
 
 		.PARAMETER Region
 			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
@@ -2079,204 +2378,37 @@ Function Mount-EBSVolumes {
 			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
 
 		.EXAMPLE
-			Mount-EBSVolumes -VolumeIds vol-04d16ab9a1b07449g -InstanceId i-057bd4fe22eced7bb -Region ([Amazon.RegionEndpoint]::USWest1)
+			Invoke-AWSEncryptString "MySecurePassword" -Key "c267f345-ef7a-40ff-95a0-a1b4dbeaac75" -EncryptionContext @{"UserName" = "john.smith"} 
+
+			Encrypts the password with the supplied encryption context and returns a base 64 string of the encrypted value.
 
 		.INPUTS
-			None
+			System.String
 
 		.OUTPUTS
-			None
+			System.Sting
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 6/5/2017
+			LAST UPDATE: 1/17/2019
 	#>
 	[CmdletBinding()]
 	Param(
-		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
-		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
+		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
 		[ValidateNotNull()]
-		[System.String[]]$VolumeIds,
+		[System.String]$InputObject,
 
-		[Parameter(ParameterSetName = "InputObjectAndNextAvailable", Mandatory = $true)]
-		[Parameter(ParameterSetName = "IdAndNextAvailable", Mandatory = $true)]
-		[switch]$NextAvailableDevice,
-
-		[Parameter(ParameterSetName = "InputObjectAndDevice", Mandatory = $true)]
-		[Parameter(ParameterSetName = "IdAndDevice", Mandatory = $true)]
-		[ValidateSet("xvdf", "xvdg", "xvdh", "xvdi", "xvdj",
-			"xvdk", "xvdl", "xvdm", "xvdn", "xvdo", "xvdp")]
-		[System.String]$Device,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "IdAndDevice")]
-		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
+		[Parameter(Mandatory = $true)]
 		[ValidateNotNullOrEmpty()]
-		[System.String]$InstanceId,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndDevice")]
-		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
-		[Amazon.EC2.Model.Instance]$Instance,
+		[System.String]$Key,
 
 		[Parameter()]
 		[ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
+		[System.Collections.Hashtable]$EncryptionContext,
 
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileName = [System.String]::Empty,
-
-        [Parameter()]
+		[Parameter()]
 		[ValidateNotNull()]
-        [System.String]$AccessKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SecretKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SessionToken = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [Amazon.Runtime.AWSCredentials]$Credential,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileLocation = [System.String]::Empty
-	)		
-
-	Begin {
-	}
-
-	Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-
-		if ($PSCmdlet.ParameterSetName.StartsWith("Id"))
-		{
-			$Destination = Get-EC2Instance -InstanceId $InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
-		}
-
-		[System.String]$DeviceBase = "xvd"
-		[System.Int32]$CurrentLetter = 0
-
-		if ($NextAvailableDevice)
-		{
-			#If you map an EBS volume with the name xvda, Windows does not recognize the volume.
-			$CurrentLetter = [System.Int32][System.Char]'f'
-		}
-		else
-		{
-			$CurrentLetter = [System.Int32][System.Char]$Device.Substring($Device.Length - 1)
-		}
-
-		#Iterate all of the new volumes and attach them
-		foreach ($Item in $VolumeIds)
-		{
-			try
-			{
-				$Destination = Get-EC2Instance -InstanceId $Destination.InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
-				[System.String[]]$Devices = $Destination.BlockDeviceMappings | Select-Object -ExpandProperty DeviceName
-
-				#Try to find an available device
-				while ($Devices.Contains($DeviceBase + [System.Char]$CurrentLetter) -and [System.Char]$CurrentLetter -ne 'q')
-				{
-					$CurrentLetter++
-				}
-
-				#The last usable letter is p
-				if ([System.Char]$CurrentLetter -ne 'q')
-				{
-					Write-Verbose -Message "Attaching $Item to $($Destination.InstanceId) at device $DeviceBase$([System.Char]$CurrentLetter)"
-                        
-					#The cmdlet will create the volume as the same size as the snapshot
-					[Amazon.EC2.Model.VolumeAttachment]$Attachment = Add-EC2Volume -InstanceId $Destination.InstanceId -VolumeId $Item -Device ($DeviceBase + [System.String][System.Char]$CurrentLetter) @Splat
-					Write-Verbose -Message "Attached at $($Attachment.AttachTime)"
-                    
-					#Increment the letter so the next check doesn't try to use the same device
-					$CurrentLetter++
-				}
-				else
-				{
-					#Break out of the iteration because we can't mount any more drives
-					Write-Warning -Message "No available devices left to mount the device"
-					break
-				}
-			}
-			catch [Exception]
-			{
-				Write-Warning -Message "[ERROR] Could not attach volume $($Item.VolumeId) with error $($_.Exception.Message)"
-			}
-		}
-	}
-
-	End {
-	}
-}
-
-Function Get-EC2InstanceByNameOrId {
-	<#
-		.SYNOPSIS
-			Gets an EC2 instance object by supplying its name or instance id.
-
-		.DESCRIPTION
-			The cmdlet gets a single Amazon.EC2.Model.Instance object from an instance name tag value or instance id. If multiple instances are
-			matched from a name tag, the cmdlet throws an exception, as it also does if it doesn't find an instance based on id.
-
-		.PARAMETER InstanceId
-			The id of the instance to get.
-
-		.PARAMETER InstanceName
-			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			Get-EC2InstanceByNameOrId -Name server1 -ProfileName myprodacct
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			Amazon.EC2.Model.Instance
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 1/16/2019
-	#>
-	[CmdletBinding()]
-	Param(
-		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
-		[System.String]$InstanceId,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
-		[Alias("Name")]
-		[System.String]$InstanceName,
+		[System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8,
 
 		[Parameter()]
 		[ValidateNotNull()]
@@ -2313,63 +2445,456 @@ Function Get-EC2InstanceByNameOrId {
 	Process {
 		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
 
-		[Amazon.EC2.Model.Instance]$EC2 = $null
-
-		if ($PSCmdlet.ParameterSetName -eq "Id")
+		try
 		{
-			Write-Verbose -Message "Getting instance by Id $InstanceId."
-			$Instances = Get-EC2Instance -InstanceId $InstanceId -ErrorAction SilentlyContinue @Splat
-		}
-		else
-		{
-			Write-Verbose -Message "Getting instance by Name $InstanceName."
-			[Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
+			[System.Byte[]]$Bytes = $Encoding.GetBytes($InputObject)
 
-			# Filtering on tag values uses the "tag:" preface for the key name
-			$Filter.Name = "tag:Name"
-			$Filter.Value = $InstanceName
-                
-			# This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
-			# so save the error output and don't strongly type it
-			$Instances = Get-EC2Instance -Filter @($Filter) -ErrorAction SilentlyContinue @Splat
-		}
+			[System.Collections.Hashtable]$ContextSplat = @{}
 
-		if ($Instances -ne $null)
-		{
-			if ($Instances.Instances.Count -gt 0)
+			if ($EncryptionContext -ne $null -and $EncryptionContext.Count -gt 0)
 			{
-				if ($Instances.Instances.Count -eq 1)
-				{
-					$EC2 = $Instances.Instances | Select-Object -First 1
+				$ContextSplat.EncryptionContext = $EncryptionContext
+			}
 
-					if ($EC2 -eq $null)
-					{
-						throw "No matching instances found."
-					}
-					else
-					{
-						Write-Output -InputObject $EC2
-					}
-				}
-				else
-				{
-					throw "Ambiguous match, more than 1 EC2 instance with the name $InstanceName found. Try instance id instead."
-				}
-			}
-			else
-			{
-				throw "No matching instances found."
-			}
+			[System.IO.MemoryStream]$MStream = New-Object -TypeName System.IO.MemoryStream($Bytes, 0, $Bytes.Length)
+			[Amazon.KeyManagementService.Model.EncryptResponse]$Response = Invoke-KMSEncrypt -Plaintext $MStream -KeyId $Key @ContextSplat @Splat
+			
+			Write-Output -InputObject ([System.Convert]::ToBase64String($Response.CiphertextBlob.ToArray()))
 		}
-		else
+		finally
 		{
-			throw "Nothing was returned by the get instance request."
-		}
+			$MStream.Dispose()
+		}		
 	}
 
 	End {
 	}
 }
+
+Function Invoke-AWSKMSDecryptString {
+	<#
+		.SYNOPSIS
+			Decrypts a base 64 encoded string back to the original string.
+
+		.DESCRIPTION
+			The cmdlet takes a base 64 encoded, encrypted string and decrypts it back to plain text.
+
+			Optionally, an Encryption Context hash table can be provided to include with the encrypted string if it was provided during encryption.
+
+		.PARAMETER InputObject
+			The base 64 encoded string to decrypt.
+
+		.PARAMETER EncryptionContext
+			Name-value pair in a Hashtable that specifies the encryption context to be used for authenticated encryption. The same value must be supplied to the Decrypt API as was supplied to the Encrypt API or decryption will fail.
+
+		.PARAMETER Encoding
+			The encoding to use to convert the bytes back to text. This defaults to UTF-8.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$EncryptedString = "AQICAHirjhAS1dnk3AqaAX8ebvOi+2yKjwR2lcRsjqKC0zRl/AFALrR6jZfasOcnKLdT+Y26AAAAbjBsBgkqhkiG9w0BBwagXzBdAgEAMFgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMJnfWdFgGqptS23pfAgEQgCtqQ6FoKrjSlZDUIPTVzdDNJ/BfbbnPtlux0o8b2ya0DxUVZ5hFHroXUyFF"
+			Invoke-AWSKMSDecryptString $EncryptedString -EncryptionContext @{"UserName" = "john.smith"} 
+
+			Decrypts the string with the supplied encryption context and returns the plain text string from the encrypted value.
+
+		.INPUTS
+			System.String
+
+		.OUTPUTS
+			System.Sting
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/17/2019
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[ValidateNotNull()]
+		[System.String]$InputObject,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.Collections.Hashtable]$EncryptionContext,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		try
+		{
+			[System.Byte[]]$Bytes = [System.Convert]::FromBase64String($InputObject)
+
+			[System.Collections.Hashtable]$ContextSplat = @{}
+
+			if ($EncryptionContext -ne $null -and $EncryptionContext.Count -gt 0)
+			{
+				$ContextSplat.EncryptionContext = $EncryptionContext
+			}
+
+			[System.IO.MemoryStream]$MStream = New-Object -TypeName System.IO.MemoryStream($Bytes, 0, $Bytes.Length)
+			[Amazon.KeyManagementService.Model.DecryptResponse]$Response = Invoke-KMSDecrypt -CipherTextBlob $MStream @ContextSplat @Splat
+			
+			Write-Output -InputObject ($Encoding.GetString($Response.PlainText.ToArray()))
+		}
+		finally
+		{
+			$MStream.Dispose()
+		}		
+	}
+
+	End {
+	}
+}
+
+#endregion
+
+#region Networking Functions
+
+Function Get-AWSVPCEndpointsByLocation {
+	<#
+		.SYNOPSIS
+			Gets the available VPC endpoints for AWS services per location, which can be region or availability zone.
+
+		.DESCRIPTION
+			This cmdlets iterates all regions and gets the AWS VPC service endpoints for that region. If the cmdlet specifies ByAvailabilityZone, then it adds each AZ in that region with the available services there, otherwise, it adds the region and the available services there. If a service is available in a region, it is not necessarily available in each AZ in that region.
+
+            The cmdlet can also be run using both region and AZ as object level keys for the output object.
+
+			The output from this cmdlet is intended to be used as a Mapping resource in CloudFormation so that it provides an easy way to check whether a PrivateLink endpoint service is available.
+
+		.PARAMETER CopyToClipboard
+			Copies the output to the clipboard as a JSON string.
+
+		.PARAMETER AsJson
+			Outputs as a JSON string instead of a PSCustomObject. Use this JSON as a Mapping element in CloudFormation to see if an endpoint service is available in a specific region or AZ.
+
+		.PARAMETER ByAvailabilityZone
+			This specifies which endpoints are available by AZ instead of by region. The AZ names are the top level keys in the output. This can be used as a mapping resource in CloudFormation.
+
+        .PARAMETER ByRegionAndAZ
+            This specifies which endpoints are available by AZ instead of by region. The region names are the top level keys in the output, with the AZs being underneath them. This output cannot be used as a mapping resource in CloudFormation as it goes 1 level too deep.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$Json = Get-AWSVPCEndpointsByLocation -ProfileName dev -AsJson
+
+			Gets the VPC endpoint mapping aligned to regions and returns the data as a JSON string.
+
+		.EXAMPLE
+			$AZMapping = Get-AWSVPCEndpointsByLocation -ProfileName dev -ByAvailabilityZone
+
+			Gets the VPC endpoint mapping per AZ.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject, System.Sting
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/17/2019
+	#>
+    [CmdletBinding(DefaultParameterSetName="ByRegion")]
+    Param(
+        [Parameter()]
+        [Switch]$CopyToClipboard,
+
+        [Parameter()]
+        [Switch]$AsJson,
+
+        [Parameter(ParameterSetName = "ByAZ")]
+        [Switch]$ByAvailabilityZone,
+
+        [Parameter(ParameterSetName = "ByRegionAndAZ")]
+        [Switch]$ByRegionAndAZ,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+    )
+
+    Begin {
+    }
+
+    Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		$Splat.Remove("Region")
+
+        $Mapping = [PSCustomObject]@{}
+        $AllServices = New-Object -TypeName System.Collections.Generic.Hashset[System.String]
+
+        [System.String[]]$Regions =  Get-AWSRegion | Select-Object -ExpandProperty Region | Sort-Object
+		[System.Int32]$i = 0
+
+		$Regions | ForEach-Object {
+            $Region = $_
+
+			Write-Progress -Activity "Processing regions" -Status "Processing $Region" -PercentComplete ([System.Math]::Round(($i / $Regions.Length) * 100, 2)) 
+			$i++
+                    
+            [System.String[]]$RegionAZs = Get-EC2AvailabilityZone -Region $Region @Splat | Select-Object -ExpandProperty ZoneName | Sort-Object
+
+            Write-Verbose -Message "Processing region: $Region"
+        
+            switch ($PSCmdlet.ParameterSetName)
+            {
+                "ByRegion" {
+                    $Mapping | Add-Member -Name $Region -MemberType NoteProperty -Value ([PSCustomObject]@{})
+                    break
+                }
+                "ByAZ" {
+                    $RegionAZs | ForEach-Object {
+                        $Mapping | Add-Member -Name $_ -MemberType NoteProperty -Value ([PSCustomObject]@{})
+                    }
+                    break
+                }
+                "ByRegionAndAZ" {
+                    $Mapping | Add-Member -Name $Region -MemberType NoteProperty -Value ([PSCustomObject]@{})
+
+                    $RegionAZs | ForEach-Object {
+                        $Mapping.$Region | Add-Member -Name $_ -MemberType NoteProperty -Value ([PSCustomObject]@{})
+                    }
+
+                    break
+                }
+                default {
+                    throw "Parameter set name $($PSCmdlet.ParameterSetName) could not be resolved."
+                }
+            }
+
+            Get-EC2VpcEndpointService -Region $Region @Splat | Select-Object -ExpandProperty ServiceDetails | ForEach-Object {
+                [Amazon.EC2.Model.ServiceDetail]$Detail = $_
+
+                $Name = $Detail.ServiceName.Substring($Detail.ServiceName.IndexOf($Region) + $Region.Length).Replace(".", "").Replace("-", "")
+
+                $AllServices.Add($Name) | Out-Null
+
+                switch ($PSCmdlet.ParameterSetName)
+                {
+                    "ByRegion" {
+                        $Mapping.$Region | Add-Member -Name $Name -MemberType NoteProperty -Value $true
+                        break
+                    }
+                    "ByAZ" {
+                        $RegionAZs | ForEach-Object {                  
+                            $Mapping.$_ | Add-Member -Name $Name -MemberType NoteProperty -Value ($Detail.AvailabilityZones -icontains $_)
+                        }
+                        break
+                    }
+                    "ByRegionAndAZ" {
+                        $RegionAZs | ForEach-Object {
+                            $Mapping.$Region.$_ | Add-Member -Name $Name -MemberType NoteProperty -Value ($Detail.AvailabilityZones -icontains $_)
+                        }
+
+                        break
+                    }
+                    default {
+                        throw "Parameter set name $($PSCmdlet.ParameterSetName) could not be resolved."
+                    }
+                } 
+            }                 
+        }
+
+        # Review each region or AZ and check to see if a service was not available in the region that was available in another region,
+        # this will make sure that each AZ or region has the same list of services as all others
+        switch ($PSCmdlet.ParameterSetName)
+        {
+            {$_ -iin @("ByRegion", "ByAZ")} {
+
+                $Mapping | Get-Member -MemberType NoteProperty | ForEach-Object {
+                    $Location = $_.Name
+                    $Temp = [PSCustomObject]@{}
+                    
+                    $Names = $Mapping.$Location | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
+
+                    foreach ($Service in $AllServices)
+                    {
+                        if ($Service -inotin $Names)
+                        {
+                            Write-Verbose -Message "Adding missing service $Service to $Location"
+
+                            $Mapping.$Location | Add-Member -Name $Service -MemberType NoteProperty -Value $false
+                        }
+                    }
+
+                    $Mapping.$Location | Get-Member -MemberType NoteProperty | Sort-Object -Property Name | Select-Object -ExpandProperty Name | ForEach-Object {
+                        $Temp | Add-Member -Name $_ -MemberType NoteProperty -Value $Mapping.$Location.$_
+                    }
+
+                    $Mapping.$Location = $Temp
+                }
+                    
+                break
+            }
+            "ByRegionAndAZ" {
+                $Mapping | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name | ForEach-Object {
+                    $Region = $_
+                    $Mapping.$Region | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name | ForEach-Object {
+                        $AZ = $_
+                        $Names = $Mapping.$Region.$AZ | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
+
+                        $Temp = [PSCustomObject]@{}
+
+                        foreach ($Service in $AllServices)
+                        {
+                            if ($Service -inotin $Names)
+                            {
+                                Write-Verbose -Message "Adding missing service $Service to $Location"
+                                $Mapping.$Region.$AZ | Add-Member -Name $Service -Value $false -MemberType NoteProperty
+                            }
+                        }
+
+                        $Mapping.$Region.$AZ | Get-Member -MemberType NoteProperty | Sort-Object -Property Name | Select-Object -ExpandProperty Name | ForEach-Object {
+                            $Temp | Add-Member -Name $_ -MemberType NoteProperty -Value $Mapping.$Region.$AZ.$_
+                        }
+
+                        $Mapping.$Region.$AZ = $Temp
+                    }
+                }
+
+                break
+            }
+            default {
+                throw "Parameter set name $($PSCmdlet.ParameterSetName) could not be resolved."
+            }
+        } 
+        
+        if ($AsJson)
+        {
+            $Json = $Mapping | ConvertTo-Json
+            Write-Output -InputObject $Json          
+
+            if ($CopyToClipboard)
+            {
+                $Json | Set-Clipboard
+            }
+        }
+        else
+        {
+            Write-Output -InputObject $Mapping
+
+            if ($CopyToClipboard)
+            {
+                $Json = $Mapping | ConvertTo-Json
+                $Json | Set-Clipboard
+            }
+        }
+    }
+
+    End {
+    }
+}
+
+#endregion
+
+
+
 
 Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 	<#
@@ -3557,1653 +4082,6 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 	}
 }
 
-Function Set-EC2InstanceState {
-	<#
-		.SYNOPSIS
-			Changes the EC2 instance state to either START, STOP, TERMINATE, or RESTART the instance.
-
-		.DESCRIPTION
-			The cmdlet changes the state of the instance to achieve the desired end state if required. The cmdlet is idempotent, multiple calls to start an EC2 instance, for exampple, will succeed, but no action will be performed if the instance is already in the running state. If PassThru is specified, null will be returned if no action is taken.
-
-		.PARAMETER InstanceId
-			The id of the instance to get.
-
-		.PARAMETER InstanceName
-			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
-
-		.PARAMETER State
-			The action to perform on the EC2 instance, this is either STOP, START, RESTART, or TERMINATE. If RESTART is specified, then the Wait parameter has no effect.
-
-		.PARAMETER Timeout
-			The amount of time in seconds to wait for the EC2 to reach the desired state if the Wait parameter is specified. This defaults to 600.
-
-		.PARAMETER Wait
-			Specify to wait for the EC2 instance to reach the desired state.
-
-		.PARAMETER PassThru
-			Returns back the InstanceStateChange result or InstanceId if RESTART is specified.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			Set-EC2InstanceState -InstanceId $EC2.InstanceId -State START -Wait 
-
-			Starts the specified EC2 instance and waits for it to reach the Running state.
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			None or Amazon.EC2.Model.InstanceStateChange or System.String
-
-			A string is returned if RESTART is specified, otherwise an InstanceStateChange object is returned if PassThru is specified.
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 6/30/2017
-	#>
-	[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "HIGH")]
-	Param(
-		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
-		[Alias("Name")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$InstanceName,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$InstanceId,
-
-		[Parameter(Mandatory = $true)]
-		[ValidateSet("STOP", "START", "TERMINATE", "RESTART")]
-		[System.String]$State,
-
-		[Parameter()]
-		[Switch]$PassThru,
-
-		[Parameter()]
-		[Switch]$Wait,
-
-		[Parameter()]
-		[Switch]$Force,
-
-		[Parameter()]
-		[System.Int32]$Timeout = 600,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.RegionEndpoint]$Region,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileName = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$AccessKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SecretKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SessionToken = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.Runtime.AWSCredentials]$Credential,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-	Begin {
-	}
-
-	Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
-		[System.Collections.Hashtable]$InstanceSplat = @{}
-
-		if ($PSCmdlet.ParameterSetName.Equals("Id"))
-		{
-			$InstanceSplat.Add("InstanceId", $InstanceId)
-		}
-		else
-		{
-			$InstanceSplat.Add("InstanceName", $InstanceName)
-		}
-
-		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
-		[Amazon.EC2.InstanceStateName]$DesiredState = $null
-		[Amazon.EC2.Model.InstanceStateChange]$Result = $null
-
-		Write-Verbose -Message "Current instance state: $($Instance.State.Name)."
-
-		$ConfirmMessage = "Are you sure you want to $State instance $($Instance.InstanceId)?"
-
-		$WhatIfDescription = "$State $($Instance.InstanceId)."
-		$ConfirmCaption = "Change Instance State"
-
-		if ($Force -or $PSCmdlet.ShouldProcess($WhatIfDescription, $ConfirmMessage, $ConfirmCaption))
-		{
-			switch ($State)
-			{
-				"STOP" {
-					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopped -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopping -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::ShuttingDown)
-					{
-						$Result = Stop-EC2Instance -InstanceId $Instance.InstanceId @Splat
-					}
-					else
-					{
-						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
-					}
-
-					$DesiredState = [Amazon.EC2.InstanceStateName]::Stopped
-				
-					break
-				}
-				"START" {
-					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Running -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Pending)
-					{
-						$Result = Start-EC2Instance -InstanceId $Instance.InstanceId @Splat
-					}
-					else
-					{
-						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
-					}
-
-					$DesiredState = [Amazon.EC2.InstanceStateName]::Running
-
-					break
-				}
-				"RESTART" {
-					$Result = Restart-EC2Instance -InstanceId $Instance.InstanceId -PassThru @Splat
-
-					$DesiredState = [Amazon.EC2.InstanceStateName]::Running
-
-					break
-				}
-				"TERMINATE" {
-					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Terminated)
-					{
-						$Result = Remove-EC2Instance -InstanceId $Instance.InstanceId -Force @Splat
-					}
-					else
-					{
-						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
-					}
-
-					$DesiredState = [Amazon.EC2.InstanceStateName]::Terminated
-
-					break
-				}
-				default {
-					throw "Unexpected instance state provided: $State."
-				}
-			}
-
-			if ($Wait -and $State -ne "RESTART")
-			{
-				Write-Host -Object "Waiting for EC2 instance $($Instance.InstanceId) to $State..."
-
-				[System.Int32]$Increment = 5
-				[System.Int32]$Counter = 0
-
-				while ($Instance.State.Name -ne $DesiredState -and $Counter -lt $Timeout)
-				{
-					Write-Verbose -Message "Waiting for $($Instance.InstanceId) to $State."
-
-					Start-Sleep -Seconds $Increment
-					$Counter += $Increment
-
-					$Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
-				}
-
-				if ($Counter -ge $Timeout)
-				{
-					throw "Timeout waiting for instance to $State."
-				}
-
-				Write-Verbose -Message "Successfully completed waiting for state change."
-			}
-
-			if ($PassThru)
-			{
-				Write-Output -InputObject $Result
-			}
-		}
-	}
-
-	End {
-	}
-}
-
-Function Update-EC2InstanceAmiId {
-	<#
-		.SYNOPSIS
-			Changes the AMI id of a currently launched instance.
-
-		.DESCRIPTION
-			The cmdlet stops the source EC2 instance, detaches its EBS volumes and ENIs (except eth0), terminates the instance, launches a new EC2 instance with the specified AMI id and any configuration items like sriovsupport enabled, stops it, deletes its EBS volumes, attaches the source volumes and ENIs, and restarts the new EC2 instance.
-
-		.PARAMETER InstanceId
-			The id of the instance to get.
-
-		.PARAMETER InstanceName
-			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
-
-		.PARAMETER NewAmiId
-			The new AMI id to launch the EC2 instance with.
-
-		.PARAMETER Timeout
-			The amount of time in seconds to wait for each action to succeed. This defaults to 600.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			Update-EC2InstanceAmiId -InstanceId i-123456789012 -NewAmiId "ami-123456789012"
-
-			Changes the AMI id being used for the specified instance
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			None
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 6/30/2017
-	#>
-	[CmdletBinding()]
-	Param(
-		[Parameter(Mandatory = $true)]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$NewAmiId,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
-		[Alias("Name")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$InstanceName,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$InstanceId,
-
-		[Parameter()]
-		[System.Int32]$Timeout = 600,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.RegionEndpoint]$Region,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileName = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$AccessKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SecretKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SessionToken = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.Runtime.AWSCredentials]$Credential,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-	Begin {
-	}
-
-	Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
-
-		$InstanceSplat = @{}
-
-		if ($PSCmdlet.ParameterSetName -eq "Id")
-		{
-			Write-Verbose -Message "Using instance id $InstanceId."
-			$InstanceSplat.Add("InstanceId", $InstanceId)
-		}
-		else
-		{
-			Write-Verbose -Message "Using instance name $InstanceName."
-			$InstanceSplat.Add("InstanceName", $InstanceName)
-		}
-
-		# Get the source EC2 instance
-		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
-	
-		# Stop the source EC2 instance
-		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
-
-		[PSCustomObject[]]$BlockDevices = @()
-
-		# Detach all EBS volumes from the source machine
-		
-		foreach ($BlockDevice in $Instance.BlockDeviceMappings)
-		{
-			$BlockDevices += [PSCustomObject]@{Volume = Get-EC2Volume -VolumeId $BlockDevice.Ebs.VolumeId @Splat; DeviceName = $BlockDevice.DeviceName}
-
-			Dismount-EC2Volume -InstanceId $Instance.InstanceId -VolumeId $BlockDevice.Ebs.VolumeId @Splat | Out-Null
-		}
-
-		while (($BlockDevices | Select-Object -ExpandProperty Volume | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Count -ne $BlockDevices.Count)
-		{
-			Write-Verbose -Message "Waiting for volumes to detach."
-
-			for ($i = 0; $i -lt $BlockDevices.Length; $i++)
-			{
-				$BlockDevices[$i].Volume = Get-EC2Volume -VolumeId $BlockDevices[$i].Volume.VolumeId @Splat
-			}
-
-			Start-Sleep -Seconds 5
-		}
-
-		# Detach all the additional network interfaces
-
-		[PSCustomObject[]]$Interfaces = @()
-
-		foreach ($Interface in ($Instance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -ne 0}))
-		{
-			$Interfaces += [PSCustomObject]@{ DeviceIndex = $Interface.Attachment.DeviceIndex; Interface = $Interface}
-
-			Write-Verbose -Message "Dismounting interface $($Interface.NetworkInterfaceId) at index $($Interface.Attachment.DeviceIndex) from the source instance."				
-			Dismount-EC2NetworkInterface -AttachmentId $Interface.Attachment.AttachmentId @Splat | Out-Null
-		}
-
-		if ($Interfaces.Count -gt 0)
-		{
-			# While the count of interfaces whose status is available is not equal to the count of interfaces
-			# keep waiting until they are all available
-			# Use a minus 1 on Interfaces count since we are not detaching the interface at index 0
-			while ((($Interfaces | Select-Object -ExpandProperty Interface | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::Available }).Count -ne $Interfaces.Count - 1)
-			{
-				Write-Verbose -Message "Waiting for all network interfaces to detach."
-
-				# Start at 1 since index 0 isn't being detached
-				for ($i = 1; $i -lt $Interfaces.Length; $i++)
-				{
-					$Interfaces[$i].Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Interfaces[$i].NetworkInterfaceId @Splat
-				}
-
-				Start-Sleep -Seconds 5
-			}
-		}
-
-		Write-Verbose -Message "Deleting the original instance."
-		Write-Host -Object "Original instance AMI id: $($Instance.ImageId)"
-
-		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State TERMINATE -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
-
-		# Build some optional parameters for New-EC2Instance
-		[System.Collections.Hashtable]$NewInstanceSplat = @{}
-
-		if ($Instance.InstanceLifecycle -ne $null)
-		{
-			$NewInstanceSplat.InstanceLifecycle = $Instance.InstanceLifecycle
-		}
-
-		# Windows instances won't have a kernel id
-		if (-not [System.String]::IsNullOrEmpty($Instance.KernelId))
-		{
-			$NewInstanceSplat.KernelId = $Instance.KernelId
-		}
-
-		# Copy all of the tags from the source insance
-		if ($Instance.Tags.Count -gt 0)
-		{
-			[Amazon.EC2.Model.TagSpecification]$Tags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
-
-			$Tags.ResourceType = [Amazon.EC2.ResourceType]::Instance
-
-			$Tags.Tags = $Instance.Tags
-
-			$NewInstanceSplat.TagSpecification = $Tags
-		}
-
-		# Copy placement info for affinity, placement group, and host id
-		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.Affinity))
-		{
-			$NewInstanceSplat.Affinity = $Instance.Placement.Affinity
-		}
-
-		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.GroupName))
-		{
-			$NewInstanceSplat.PlacementGroup = $Instance.Placement.GroupName
-		}
-
-		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.HostId))
-		{
-			$NewInstanceSplat.HostId = $Instance.Placement.HostId
-		}
-
-		# This specifies if detailed monitoring is enabled
-
-		if ($Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Enabled -or $Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Pending)
-		{
-			$NewInstanceSplat.Monitoring_Enabled = $true
-		}
-
-		if ($Instance.EbsOptimized -eq $true)
-		{
-			$NewInstanceSplat.EbsOptimized = $true
-		}
-		
-		Write-Verbose -Message @"
-Launching new instance:
-	Type:              $($Instance.InstanceType)
-	Subnet:            $($Instance.SubnetId)
-	Security Groups:   $([System.String]::Join(",", ($Instance.SecurityGroups | Select-Object -ExpandProperty GroupId)))
-	AZ:                $($Instance.Placement.AvailabilityZone)
-	IAM Profile:       $($Instance.IamInstanceProfile.Arn)
-	Private IP:        $($Instance.PrivateIPAddress)
-	Tenancy:           $($Instance.Placement.Tenancy)
-"@
-
-		[Amazon.EC2.Model.Instance]$NewInstance = $null
-
-		$Temp = New-EC2Instance -ImageId $NewAmiId `
-						-AssociatePublicIp (-not [System.String]::IsNullOrEmpty($Instance.PublicIpAddress)) `
-						-KeyName $Instance.KeyName `
-						-SecurityGroupId ($Instance.SecurityGroups | Select-Object -ExpandProperty GroupId) `
-						-SubnetId $Instance.SubnetId `
-						-InstanceType $Instance.InstanceType `
-						-AvailabilityZone $Instance.Placement.AvailabilityZone `
-						-Tenancy $Instance.Placement.Tenancy `
-						-InstanceProfile_Arn $Instance.IamInstanceProfile.Arn `
-						-PrivateIpAddress $Instance.PrivateIpAddress `
-						@NewInstanceSplat @Splat
-
-		if ($Temp -eq $null)
-		{
-			throw "Could not create the new instance."
-		}
-
-		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $Temp.Instances[0].InstanceId @AwsUtilitiesSplat
-
-		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
-
-		Write-Verbose -Message "Stopping new instance."
-
-		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
-
-		if (-not [System.String]::IsNullOrEmpty($Instance.SriovNetSupport))
-		{
-			Write-Verbose -Message "Enabling SrIovNetSupport"
-			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -SriovNetSupport $Instance.SriovNetSupport @Splat | Out-Null
-		}
-
-		if ($Instance.EnaSupport -eq $true)
-		{
-			Write-Verbose -Message "Enabling ENA"
-			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -EnaSupport $true @Splat | Out-Null
-		}
-
-		# Update the interface at index 0 because we can't specify New-EC2Instance with both a set of security groups for the instance
-		# in addition to security groups for the ENI as well as a specific subnet for the instance and ENI
-
-		[Amazon.EC2.Model.InstanceNetworkInterface]$RootNetDevice = $NewInstance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -eq 0} | Select-Object -First 1
-		[Amazon.EC2.Model.InstanceNetworkInterface]$SourceRootInterface = $Interfaces | Where-Object {$_.DeviceIndex -eq 0} | Select-Object -First 1 -ExpandProperty Interface
-
-		[System.Collections.Hashtable]$InterfaceSplat = @{}
-
-		if ($SourceRootInterface.SourceDestCheck -ne $null)
-		{
-			$InterfaceSplat.SourceDestCheck = $SourceRootInterface.SourceDestCheck
-		}
-
-		if (-not [System.String]::IsNullOrEmpty($SourceRootInterface.Description))
-		{
-			$InterfaceSplat.Description = $SourceRootInterface.Description
-		}
-
-		if ($SourceRootInterface.Groups.Count -gt 0)
-		{
-			$InterfaceSplat.Groups = ($SourceRootInterface.Groups | Select-Object -ExpandProperty GroupId) 
-		}
-
-		if ($InterfaceSplat.Count -gt 0)
-		{
-			Write-Verbose -Message "Updated primary network interface attributes."
-			Edit-EC2NetworkInterfaceAttribute -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId `
-											@InterfaceSplat `
-											@Splat | Out-Null
-		}
-
-		# If the source machine had multiple IPs on the root ENI, add those IPs back
-		if ($SourceRootInterface.PrivateIpAddresses.Count -gt 1)
-		{
-			Write-Verbose -Message "Adding secondary IP addresses to root network interface."
-			Register-EC2PrivateIpAddress -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId -PrivateIpAddress ($SourceRootInterface.PrivateIpAddresses | Where-Object {$_.Primary -eq $false} | Select-Object -ExpandProperty PrivateIpAddress) @Splat | Out-Null
-		}
-								
-		[Amazon.EC2.Model.NetworkInterface[]]$InterfacesToDelete = @()
-
-		foreach ($Interface in ($NewInstance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -ne 0 }))
-		{
-			$InterfacesToDelete += Get-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId @Splat
-			Write-Verbose -Message "Dismounting network interface $($Interface.NetworkInterfaceId) from new instance."
-			Dismount-EC2NetworkInterface -AttachmentId $Interface.Attachment.AttachmentId @Splat | Out-Null
-		}
-
-		if ($InterfacesToDelete.Count -gt 0)
-		{
-			while ((($InterfacesToDelete | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::Available }).Count -ne $InterfacesToDelete.Count)
-			{
-				Write-Verbose -Message "Waiting for all network interfaces to detach."
-
-				for ($i = 0; $i -lt $InterfacesToDelete.Length; $i++)
-				{
-					$InterfacesToDelete[$i] = Get-EC2NetworkInterface -NetworkInterfaceId $InterfacesToDelete[$i].NetworkInterfaceId @Splat
-				}
-
-				Start-Sleep -Seconds 5
-			}
-
-			foreach ($Interface in $InterfacesToDelete)
-			{
-				Write-Verbose -Message "Deleting interface $($Interface.NetworkInterfaceId)."
-				Remove-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId -Force @Splat | Out-Null
-			}
-		}
-
-		# Update the value we have after all the interfaces have been updated, removed, and/or deleted
-		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
-
-		if ($Interfaces.Count -gt 0)
-		{
-			Write-Verbose -Message "Adding network interfaces to the new instance."
-
-			foreach ($Interface in $Interfaces)
-			{
-				Write-Verbose -Message "Adding $($Interface.Interface.NetworkInterfaceId) at index $($Interface.DeviceIndex)."
-				Add-EC2NetworkInterface -InstanceId $NewInstance.InstanceId -NetworkInterfaceId $Interface.Interface.NetworkInterfaceId -DeviceIndex $Interface.DeviceIndex @Splat | Out-Null
-			}
-
-			while ((($Interfaces | Select-Object -ExpandProperty Interface | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::InUse }).Count -ne $Interfaces.Count)
-			{
-				Write-Verbose -Message "Waiting for all network interfaces to be in use."
-
-				for ($i = 0; $i -lt $Interfaces.Count; $i++)
-				{
-					$Interfaces[$i].Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Interfaces[$i].Interface.NetworkInterfaceId @Splat
-				}
-
-				Start-Sleep -Seconds 5
-			}
-		}
-
-		# Update again after new interfaces have been added
-		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
-
-		Write-Verbose -Message "Removing EBS volumes from the new instance."
-
-		[Amazon.EC2.Model.Volume[]]$VolumesToDelete = @()
-
-		foreach ($BlockDevice in $NewInstance.BlockDeviceMappings)
-		{
-			Write-Verbose -Message "Dismounting device $($BlockDevice.Ebs.VolumeId) at $($BlockDevice.DeviceName)."
-			Dismount-EC2Volume -InstanceId $NewInstance.InstanceId -VolumeId $BlockDevice.Ebs.VolumeId @Splat | Out-Null
-
-			$VolumesToDelete += Get-EC2Volume -VolumeId $BlockDevice.Ebs.VolumeId @Splat
-		}
-
-		if ($VolumesToDelete.Count -gt 0)
-		{
-			while (($VolumesToDelete | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Count -ne $VolumesToDelete.Length)
-			{
-				Write-Verbose -Message "Waiting for volumes to become available."
-
-				for ($i = 0; $i -lt $VolumesToDelete.Length; $i++)
-				{
-					$VolumesToDelete[$i] = Get-EC2Volume -VolumeId $VolumesToDelete[$i].VolumeId @Splat
-				}
-
-				Start-Sleep -Seconds 5
-			}
-
-			foreach ($Volume in $VolumesToDelete)
-			{
-				Write-Verbose -Message "Deleting new instance volume $($Volume.VolumeId)." 
-				Remove-EC2Volume -VolumeId $Volume.VolumeId -Force @Splat
-			}
-		}
-
-		# Update again after all volumes have been removed
-		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
-
-		Write-Verbose -Message "Adding original EBS volumes to new instance."
-
-		foreach ($BlockDevice in $BlockDevices)
-		{
-			Write-Verbose -Message "Adding $($BlockDevice.Volume.VolumeId) to device $($BlockDevice.DeviceName)."
-			Add-EC2Volume -InstanceId $NewInstance.InstanceId -Device $BlockDevice.DeviceName -VolumeId $BlockDevice.Volume.VolumeId @Splat | Out-Null
-		}
-
-		$Counter = 0
-
-		while (($BlockDevices | Select-Object -ExpandProperty Volume | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::InUse}).Count -ne $BlockDevices.Count -and $Counter -lt $Timeout)
-		{
-			Write-Verbose -Message "Waiting for volumes to be attached."
-
-			for ($i = 0; $i -lt $BlockDevices.Length; $i++)
-			{
-				$BlockDevices[$i].Volume = Get-EC2Volume -VolumeId $BlockDevices[$i].Volume.VolumeId @Splat
-			}
-
-			Start-Sleep -Seconds 5
-			$Counter += 5
-		}
-
-		if ($Counter -ge $Timeout)
-		{
-			throw "Timout waiting for volumes to be attached to the new instance."
-		}
-
-		Write-Verbose -Message "Starting instance."
-
-		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Force @AwsUtilitiesSplat 
-	}
-
-	End {
-
-	}
-}
-
-Function Invoke-EnableCloudWatch {
-	<#
-		.SYNOPSIS
-			Enables CloudWatch Logs and custom metrics on the local EC2 instance.
-
-		.DESCRIPTION
-			The cmdlet uses SSM or EC2Config to enable CloudWatch Logs and custom metrics. If a bucket and key are specified, the json config file is downloaded and used to configure the service. If the SSMDocument is specified, it is used with a state manager association.
-
-			If null or empty values are provided to bucket or key, the cmdlet creates an empty configuration file and enables EC2Config to send logs and metrics, but does not configure any.
-
-		.PARAMETER Key
-			The key of the object in S3 that is the config document for CloudWatch, this should be AWS.EC2.Windows.CloudWatch.json with any additional prefixes.
-
-		.PARAMETER Bucket
-			The bucket containing the configuration document.
-
-		.PARAMETER SSMDocument
-			The SSM Document to associate with the EC2 instance to enable CloudWatch.
-
-		.PARAMETER RestartServices
-			If specified, initiates a restart of either the SSMAgent or EC2Config service so that the new settings take effect. The service restart is executed as a scheduled task run by the SYSTEM account to ensure it succeeds and to prevent terminating being denied terminating the service because it is currently executing a script with this cmdlet.
-
-		.EXAMPLE
-			Invoke-EnableCloudWatch -Key AWS.EC2.Windows.CloudWatch.json -Bucket ec2configs -RestartServices
-			
-			Downloads the file from S3 with pre-existing CloudWatch configurations and restarts the appropriate service depending on the version of Windows (either SSM Agent or EC2Config).
-
-		.INPUTS
-			None
-
-		.OUTPUTS 
-			None
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 6/30/2017
-			
-	#>
-	[CmdletBinding(DefaultParameterSetName = "LocalConfig")]
-	Param(
-		[Parameter(ParameterSetName = "LocalConfig")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$Key,
-
-		[Parameter(ParameterSetName = "LocalConfig")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$Bucket,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "SSM")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$SSMDocument,
-
-		[Parameter()]
-		[switch]$RestartServices
-	)
-
-	Begin {
-	}
-
-	Process {
-		try
-		{
-			[System.String]$CloudWatchLogConfigDestination = "$env:ProgramFiles\Amazon\Ec2ConfigService\Settings\AWS.EC2.Windows.CloudWatch.json"
-			[System.String]$EC2SettingsFile="$env:ProgramFiles\Amazon\Ec2ConfigService\Settings\Config.xml"
-
-			Write-Host -Message "Enabling CloudWatch Logs."
-
-			$AWSSoftware = Get-AWSSoftware
-			$SSMSoftware = $AWSSoftware | Where-Object -FilterScript {$_.DisplayName -eq "Amazon SSM Agent"} | Select-Object -First 1
-			$EC2ConfigSW = $AWSSoftware | Where-Object -FilterScript {$_.DisplayName -eq "EC2ConfigService"} | Select-Object -First 1
-
-			if ($SSMSoftware -ne $null -and -not [System.String]::IsNullOrEmpty($SSMDocument))
-			{
-				Write-Host -Message "Using SSM to configure CloudWatch."
-					
-				$ServiceName = "AmazonSSMAgent"
-
-				$InstanceId = Get-EC2InstanceId
-
-				try
-				{
-					Write-Host -Message "Updating SSM agent to latest."
-					New-SSMAssociation -InstanceId $InstanceId -Name "AWS-UpdateSSMAgent" -Force
-				}
-				catch [Amazon.SimpleSystemsManagement.Model.AssociationAlreadyExistsException]
-				{
-					Write-Host -Message "The AWS-UpdateSSMAgent association already exists."
-				}
-
-				try
-				{
-					Write-Log -Message "Associating CloudWatch SSM Document $SSMDocument."
-					New-SSMAssociation -Target  @{Key="instanceids"; Values=@($InstanceId)} -Name $SSMDocument -Parameter @{"status" = "Enabled"} -Force
-				}
-					catch [Amazon.SimpleSystemsManagement.Model.AssociationAlreadyExistsException]
-					{
-						Write-Log -Message "The $CloudWatchSSMDocument association already exists."
-					}
-				}
-				elseif ($EC2ConfigSW -ne $null)
-				{
-					$ServiceName = "EC2Config"
-
-					Write-Log -Message "EC2Config Service Version $($EC2ConfigSW.DisplayVersion)"
-
-					if (-not [System.String]::IsNullOrEmpty($Bucket) -and -not [System.String]::IsNullOrEmpty($Key))
-					{
-						Write-Log -Message "Downloading CloudWatch configuration file."
-			
-						Copy-S3Object -BucketName $Bucket -Key $Key -LocalFile $CloudWatchLogConfigDestination -Force
-					}
-
-					if (-not (Test-Path -Path $CloudWatchLogConfigDestination))
-					{
-						$Val = @"
-{
-  "IsEnabled": true,
-  "EngineConfiguration": {
-    "PollInterval": "00:00:05",
-    "Components": [
-	],
-    "Flows": {
-      "Flows": [
-      ]
-    }
-  }
-}
-"@
-						Set-Content -Path $CloudWatchLogConfigDestination -Value $Val -Force
-					}
-
-
-					# Version is 0xMMmmBBB
-					[System.String]$Hex = $EC2ConfigSW.Version.ToString("X")
-
-					# The major and minor values are stored little endian, so they need to be flipped
-					# The build number is stored big endian
-					$Hex = $Hex.Substring(1, 1) + $Hex.Substring(0, 1)
-					$Major = [System.Int32]::Parse($Hex.Substring(0, 2), [System.Globalization.NumberStyles]::HexNumber)
-
-					# For EC2Config less than version 4, enabling CloudWatch has to be done in the XML config
-					if ($Major -lt 4)
-					{
-						Write-Log -Message "Ensuring the IsEnabled property isn't present in the config file."
-
-						[PSCustomObject]$Obj = ConvertFrom-Json -InputObject (Get-Content -Path $CloudWatchLogConfigDestination -Raw)
-					
-						if ($Obj.Properties.Name -icontains "IsEnabled")
-						{
-							$Obj.Properties.Remove("IsEnabled")
-							Set-Content -Path $CloudWatchLogConfigDestination -Value (ConvertTo-Json -InputObject $Obj) -Force
-						}
-
-						Write-Log -Message "Retrieving EC2Config settings file."
-			
-						[System.Xml.XmlDocument]$Xml = Get-Content -Path $EC2SettingsFile
-						$Xml.Get_DocumentElement().Plugins.ChildNodes | Where-Object {$_.Name -eq "AWS.EC2.Windows.CloudWatch.PlugIn"} | ForEach-Object { $_.State = "Enabled"}
-			
-						Write-Log -Message "Saving updated settings file."
-						$Xml.Save($EC2SettingsFile)
-					}
-					# Othwerwise it is done in the CloudWatch json file and SSM uses it to deliver logs and metrics
-					else
-					{
-						Write-Log -Message "Ensuring the IsEnabled property is present and set to true in the config file."
-
-						[PSCustomObject]$Obj = ConvertFrom-Json -InputObject (Get-Content -Path $CloudWatchLogConfigDestination -Raw)
-					
-						$Obj.IsEnabled = $true
-						Set-Content -Path $CloudWatchLogConfigDestination -Value (ConvertTo-Json -InputObject $Obj) -Force
-
-						$ServiceName = "AmazonSSMAgent"
-					}
-
-					if (-not $Reboot)
-					{
-						try 
-						{
-							$RestartServiceTaskName = "Restart$ServiceName`Task"
-  
-							Write-Log -Message "Creating scheduled task to restart $ServiceName service."
-
-							if ((Get-ScheduledTask -TaskName $RestartServiceTaskName -ErrorAction SilentlyContinue) -ne $null) 
-							{
-								Unregister-ScheduledTask -TaskName $RestartServiceTaskName -Confirm:$false
-							}
-
-							$Command = @"
-try {					
-	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Executing scheduled task $RestartServiceTaskName, waiting 30 seconds for other actions to complete."
-	Start-Sleep -Seconds 30
-	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Removing script file at $PSCommandPath."
-	Remove-Item -Path "$PSCommandPath" -Force
-	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Restarting $ServiceName service."
-	Restart-Service -Name $ServiceName -Force
-	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Unregistering scheduled task."
-	Unregister-ScheduledTask -TaskName $RestartServiceTaskName -Confirm:`$false
-	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Successfully unregistered scheduled task, task complete."
-} 
-catch [Exception] {
-	Add-Content -Path "$script:LogPath" -Value "[ERROR] `$(Get-Date) : `$(`$_.Exception.Message)"
-	Add-Content -Path "$script:LogPath" -Value "[ERROR] `$(Get-Date) : `$(`$_.Exception.StackTrace)"
-}
-"@
-
-							$Bytes = [System.Text.Encoding]::Unicode.GetBytes($Command)
-							$EncodedCommand = [Convert]::ToBase64String($Bytes)
-        
-							$STParams = "-NonInteractive -WindowStyle Hidden -NoProfile -NoLogo -EncodedCommand $EncodedCommand"
-							$STSource =  "$env:SYSTEMROOT\System32\WindowsPowerShell\v1.0\powershell.exe"
-							$STAction = New-ScheduledTaskAction -Execute $STSource -Argument $STParams
-							$STPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-							$STSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -DontStopIfGoingOnBatteries -DontStopOnIdleEnd -MultipleInstances IgnoreNew
-                               
-							$ScheduledTask = Register-ScheduledTask -TaskName $RestartServiceTaskName -Action $STAction -Principal $STPrincipal -Settings $STSettings -ErrorAction Stop 
-							Start-ScheduledTask -TaskName $RestartServiceTaskName
-						}
-						catch [Exception] {
-							Write-Log -Message "Error running scheduled task to restart $ServiceName service." -ErrorRecord $_ -Level ERROR
-						}
-					}					
-				}
-				else
-				{
-					Write-Log -Message "The SSM Agent and the EC2Config service are both not installed, cannot configure CloudWatch." -Level WARNING
-				}
-			}
-			catch [Exception]
-			{
-				Write-Log -Message "Error configuring CloudWatch." -ErrorRecord $_ -Level ERROR
-			}
-		}
-
-		End {
-		}
-	}
-
-Function Get-AWSCurrentImageIds {
-	<#
-		.SYNOPSIS 
-			Gets the most current AMI image id for Windows and Amazon Linux, Debian, CentOS, Ubuntu, and SLES instances in each region.
-
-		.DESCRIPTION
-			The cmdlet retrieves the most current AMI image id for Windows Server 2012 through Windows Server 2019, Amazon Linux, Amazon Linux 2, Ubuntu 18.04, SLES 15, CentOS 7 and Debian 9. 
-
-            Mappings for ARM and x86 processors are provided as well as Linux images with .NET Core 2.1 pre-installed. 
-
-            The output is a	json formatted string that is targetted for usage in the Mappings section in an AWS Cloudformation script. This gives you an easy way to reference the most recent AMI id for an OS in CloudFormation as well as easily update that mapping element over time.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. 
-
-            If this parameter is specified, the AMI mappings are only returned for that region, otherwise mappings are returned for every region.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			Get-AWSCurrentImageIds
-
-			Retrieves the AMI mappings for all included Operating Systems in every public region.
-
-		.EXAMPLE
-			Get-AWSCurrentImageIds -Region ([Amazon.RegionEndpoint]::UsEast1) -ProfileName myprodprofile
-
-			Gets the AMI mappings for all included Operating Systems in the us-east-1 region using the credentials in the "myprodprofile" profile.
-		
-		.INPUTS
-			None
-
-		.OUTPUTS
-			System.String
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 1/17/2019		
-	#>
-    [CmdletBinding()]
-    Param(
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.RegionEndpoint]$Region,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileName = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$AccessKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SecretKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SessionToken = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.Runtime.AWSCredentials]$Credential,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-    Begin {
-        $OperatingSystems = @{
-			WindowsServer2019 = "Windows_Server-2019-English-Full-Base-*";
-            WindowsServer2016 = "Windows_Server-2016-English-Full-Base-*";
-            WindowsServer2012R2 = "Windows_Server-2012-R2_RTM-English-64Bit-Base-*";
-            WindowsServer2012 = "Windows_Server-2012-RTM-English-64Bit-Base-*";
-            AmazonLinux_x86_64 = "amzn-ami-hvm-*-x86_64-gp2";
-			AmazonLinux2_x86_64 = "amzn2-ami-hvm-*-x86_64-gp2";
-			AmazonLinux2_arm64 = "amzn2-ami-hvm-*-arm64-gp2";
-			AmazonLinux2_netcore21_x86_64 = "amzn2-ami-hvm-*-x86_64-gp2-dotnetcore-*";
-			Ubuntu1804_x86_64 = "ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-amd64-server-20??????";
-			Ubuntu1804_arm64 = "ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-arm64-server-20??????";
-			Ubuntu1804_netcore21_x86_64 = "ubuntu-bionic-18.04-amd64-server-*-dotnetcore-*"
-			SUSE15_x86_64 = "suse-sles-15-*-hvm-ssd-x86_64";
-			CentOS7_x86_64 = "CentOS Linux 7 x86_64 HVM EBS ENA*";
-			Debian9_x86_64 = "debian-stretch-hvm-x86_64-gp2*";
-        }
-    }
-
-    Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-        $Splat.Remove("Region")		 
-
-        if ($PSBoundParameters.ContainsKey("Region"))
-        {
-            [Amazon.PowerShell.Common.AWSRegion[]]$Regions = Get-AWSRegion -SystemName $Region.SystemName 
-        }
-        else
-        {
-            [Amazon.PowerShell.Common.AWSRegion[]]$Regions = Get-AWSRegion
-        }
-
-        [PSCustomObject]$Results = [PSCustomObject]@{}
-
-        $Jobs = @()
-        
-        foreach ($Item in $Regions)
-        {
-            Write-Verbose -Message "Starting background job for region $($Item.Region)."
-
-            $Job = Start-Job -Name $Item.Name -ScriptBlock {
-                Import-Module AWSPowerShell
-                $Region = $using:Item
-                $Splat = $using:Splat
-                $OS = $using:OperatingSystems
-                
-                [PSCustomObject]$RegionResults = [PSCustomObject]@{Name = $Region.Name; Region = $Region.Region}
-
-                $OS.GetEnumerator() | Sort-Object -Property Key | ForEach-Object {
-                    try
-                    {
-                        $Key = $_.Key
-                        [Amazon.EC2.Model.Filter]$Filter = New-Object -TypeName Amazon.EC2.Model.Filter
-                        $Filter.Name = "name"
-                        $Filter.Value = $_.Value
-            
-                        $Id = [System.String]::Empty
-                        $Id = Get-EC2Image -Filter @($Filter) -Region $Region.Region -ErrorAction SilentlyContinue @Splat | Sort-Object -Property CreationDate -Descending | Select-Object -ExpandProperty ImageId -First 1
-
-                        if (-not [System.String]::IsNullOrEmpty($Id))
-                        {
-                            $RegionResults | Add-Member -MemberType NoteProperty -Name $_.Key -Value $Id
-                        }
-                    }
-                    catch [Exception]
-                    {
-                        Write-Warning -Message "Error processing $Key in $($Region.Region): $($_.Exception.Message)"
-                    }
-                }
-                
-                Write-Output -InputObject $RegionResults
-            }
-
-            $Jobs += $Job
-        }
-        
-        Write-Verbose -Message "Waiting on jobs to complete"
-
-        [PSCustomObject[]]$JobResults = $Jobs | Receive-Job -AutoRemoveJob -Wait | Select-Object -Property * -ExcludeProperty PSComputerName,RunspaceId,PSSourceJobInstanceId,PSShowComputerName
-        
-        foreach ($Item in ($JobResults | Sort-Object -Property Region))
-        {
-            $Results | Add-Member -Name $Item.Region -Value ($Item | Select-Object -Property * -ExcludeProperty Region) -MemberType NoteProperty
-        }
-
-        Write-Output -InputObject ($Results | ConvertTo-Json)
-    }
-
-	End {
-	}
-}
-
-Function Invoke-AWSKMSEncryptString {
-	<#
-		.SYNOPSIS
-			Encrypts a plain text string with an AWS KMS key.
-
-		.DESCRIPTION
-			The cmdlet takes a plain text string and encrypts it with an AWS KMS key and returns back a Base 64 encoded string of the encrypted plain text.
-
-			Optionally, an Encryption Context hash table can be provided to include with the encrypted string.
-
-		.PARAMETER InputObject
-			The string to encrypt.
-
-		.PARAMETER Key
-			The Key Id (a string version of a GUID) or the Key alias.
-
-		.PARAMETER EncryptionContext
-			Name-value pair in a Hashtable that specifies the encryption context to be used for authenticated encryption. If used here, the same value must be supplied to the Decrypt API or decryption will fail.
-
-		.PARAMETER Encoding
-			The encoding to use to convert the text to bytes. This defaults to UTF-8.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			Invoke-AWSEncryptString "MySecurePassword" -Key "c267f345-ef7a-40ff-95a0-a1b4dbeaac75" -EncryptionContext @{"UserName" = "john.smith"} 
-
-			Encrypts the password with the supplied encryption context and returns a base 64 string of the encrypted value.
-
-		.INPUTS
-			System.String
-
-		.OUTPUTS
-			System.Sting
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 1/17/2019
-	#>
-	[CmdletBinding()]
-	Param(
-		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-		[ValidateNotNull()]
-		[System.String]$InputObject,
-
-		[Parameter(Mandatory = $true)]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$Key,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.Collections.Hashtable]$EncryptionContext,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8,
-
-		[Parameter()]
-		[ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileName = [System.String]::Empty,
-
-        [Parameter()]
-		[ValidateNotNull()]
-        [System.String]$AccessKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SecretKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SessionToken = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [Amazon.Runtime.AWSCredentials]$Credential,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-	Begin {
-	}
-
-	Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-
-		try
-		{
-			[System.Byte[]]$Bytes = $Encoding.GetBytes($InputObject)
-
-			[System.Collections.Hashtable]$ContextSplat = @{}
-
-			if ($EncryptionContext -ne $null -and $EncryptionContext.Count -gt 0)
-			{
-				$ContextSplat.EncryptionContext = $EncryptionContext
-			}
-
-			[System.IO.MemoryStream]$MStream = New-Object -TypeName System.IO.MemoryStream($Bytes, 0, $Bytes.Length)
-			[Amazon.KeyManagementService.Model.EncryptResponse]$Response = Invoke-KMSEncrypt -Plaintext $MStream -KeyId $Key @ContextSplat @Splat
-			
-			Write-Output -InputObject ([System.Convert]::ToBase64String($Response.CiphertextBlob.ToArray()))
-		}
-		finally
-		{
-			$MStream.Dispose()
-		}		
-	}
-
-	End {
-	}
-}
-
-Function Invoke-AWSKMSDecryptString {
-	<#
-		.SYNOPSIS
-			Decrypts a base 64 encoded string back to the original string.
-
-		.DESCRIPTION
-			The cmdlet takes a base 64 encoded, encrypted string and decrypts it back to plain text.
-
-			Optionally, an Encryption Context hash table can be provided to include with the encrypted string if it was provided during encryption.
-
-		.PARAMETER InputObject
-			The base 64 encoded string to decrypt.
-
-		.PARAMETER EncryptionContext
-			Name-value pair in a Hashtable that specifies the encryption context to be used for authenticated encryption. The same value must be supplied to the Decrypt API as was supplied to the Encrypt API or decryption will fail.
-
-		.PARAMETER Encoding
-			The encoding to use to convert the bytes back to text. This defaults to UTF-8.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			$EncryptedString = "AQICAHirjhAS1dnk3AqaAX8ebvOi+2yKjwR2lcRsjqKC0zRl/AFALrR6jZfasOcnKLdT+Y26AAAAbjBsBgkqhkiG9w0BBwagXzBdAgEAMFgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMJnfWdFgGqptS23pfAgEQgCtqQ6FoKrjSlZDUIPTVzdDNJ/BfbbnPtlux0o8b2ya0DxUVZ5hFHroXUyFF"
-			Invoke-AWSKMSDecryptString $EncryptedString -EncryptionContext @{"UserName" = "john.smith"} 
-
-			Decrypts the string with the supplied encryption context and returns the plain text string from the encrypted value.
-
-		.INPUTS
-			System.String
-
-		.OUTPUTS
-			System.Sting
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 1/17/2019
-	#>
-	[CmdletBinding()]
-	Param(
-		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-		[ValidateNotNull()]
-		[System.String]$InputObject,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.Collections.Hashtable]$EncryptionContext,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8,
-
-		[Parameter()]
-		[ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileName = [System.String]::Empty,
-
-        [Parameter()]
-		[ValidateNotNull()]
-        [System.String]$AccessKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SecretKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SessionToken = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [Amazon.Runtime.AWSCredentials]$Credential,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-	Begin {
-	}
-
-	Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-
-		try
-		{
-			[System.Byte[]]$Bytes = [System.Convert]::FromBase64String($InputObject)
-
-			[System.Collections.Hashtable]$ContextSplat = @{}
-
-			if ($EncryptionContext -ne $null -and $EncryptionContext.Count -gt 0)
-			{
-				$ContextSplat.EncryptionContext = $EncryptionContext
-			}
-
-			[System.IO.MemoryStream]$MStream = New-Object -TypeName System.IO.MemoryStream($Bytes, 0, $Bytes.Length)
-			[Amazon.KeyManagementService.Model.DecryptResponse]$Response = Invoke-KMSDecrypt -CipherTextBlob $MStream @ContextSplat @Splat
-			
-			Write-Output -InputObject ($Encoding.GetString($Response.PlainText.ToArray()))
-		}
-		finally
-		{
-			$MStream.Dispose()
-		}		
-	}
-
-	End {
-	}
-}
-
-Function Get-AWSFederationLogonUrl {
-	<#
-		.SYNOPSIS
-			Generates a temporary url that allows a logon to the AWS Management Console with an assumed role.
-
-		.DESCRIPTION
-			The cmdlet builds a url that can be used to logon to the AWS Management Console. First, the provided role is assumed using the specified credentials (or uses the default credentials).
-			Then, the cmdlet retrieves a federation signin token and then creates the login url. The provided credentials do not need to exist in the same account as the specified role, they just 
-			need permissions to be able to perform the sts:AssumeRole action for the provide role ARN.
-
-			The url can then be provided to a user to be able to access the management console with the credentials of the supplied role in the RoleArn parameter.
-
-		.PARAMETER RoleArn
-			The role in the account you want to assume and log into. This role must be assumed using long-term AWS credentials (not temporary credentials). This is the role and permissions the user will have when accessing the management console. The user calling this cmdlet must have permisions to assume that role in order for the call to succeed.
-
-		.PARAMETER Duration
-			How long the assumed role credentials are good for between 900 and 3600 seconds. Regardless of what value is specified, the resulting Url is always valid for 15 minutes.
-
-		.PARAMETER Issuer
-			The url of your custom authentication system. This will default to https://<AWS Account Id>.signin.aws.amazon.com.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			Get-AWSFederationLogonUrl -RoleArn "arn:aws:iam::123456789012:role/AdministratorRole" -ProfileName mydev
-			
-			Gets the AWS management console signin url for the AdministratorRole in the 123456789012 account. The credentials stored in the mydev profile are used to call AssumeRole on the provided role and generate the federated logon url.
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			System.String
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 1/17/2019
-	#>
-	[CmdletBinding()]
-	Param(
-		[Parameter(Mandatory = $true)]
-		[System.String]$RoleArn,
-
-		[Parameter()]
-		[ValidateRange(900, 3600)]
-		[System.Int32]$Duration = 3600,
-
-		[Parameter()]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$Issuer = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileName = [System.String]::Empty,
-
-        [Parameter()]
-		[ValidateNotNull()]
-        [System.String]$AccessKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SecretKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SessionToken = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [Amazon.Runtime.AWSCredentials]$Credential,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-	Begin {
-		$Destination = [System.Net.WebUtility]::UrlEncode("https://console.aws.amazon.com")
-	}
-
-	Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-
-		# Get caller identity
-		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @Splat
-
-		# Create the session name from the identity
-		$SessionName = "$($Identity.Account)-$($Identity.UserId)-$($Identity.Arn.Split("/")[-1])"
-		$SessionName = $SessionName.Substring(0, [System.Math]::Min(64, $SessionName.Length)) -replace "[^\\w +=,.@-]*",""
-		
-		# Assume the role in the remote account
-		[Amazon.SecurityToken.Model.AssumeRoleResponse]$Role = Use-STSRole -DurationInSeconds $Duration -RoleSessionName $SessionName -RoleArn $RoleArn @Splat
-
-		# Form the url to to get the signin token
-		$Url = "$script:FederationUrl`?Action=getSigninToken&SessionType=json&Session={`"sessionId`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.AccessKeyId))`",`"sessionKey`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SecretAccessKey))`",`"sessionToken`":`"$([System.Net.WebUtility]::UrlEncode($Role.Credentials.SessionToken))`"}"
-
-		<# Get the token, it's in the form of
-		{
-			"SiginToken" : "UniqueStringHere"
-		}
-		#>
-		[PSCustomObject]$Response = Invoke-WebRequest -Uri $Url -Method Get | Select-Object -ExpandProperty Content | ConvertFrom-Json
-
-		# Set the issuer if it wasn't provided by the user
-		if ([System.String]::IsNullOrEmpty($Issuer))
-		{
-			$Issuer = "https://$($Identity.Account).signin.aws.amazon.com"
-		}
-
-		$Issuer = [System.Net.WebUtility]::UrlEncode($Issuer)		
-		$Token = [System.Net.WebUtility]::UrlEncode($Response.SigninToken)
-		$Action = "login"
-
-		# Create the signin url, it's valid for 15 minutes regardless of the duration of the assumed role
-		[System.String]$Signin = "$script:FederationUrl`?Action=$Action&Issuer=$Issuer&Destination=$Destination&SigninToken=$Token"
-
-		Write-Output -InputObject $Signin
-	}
-
-	End {
-	}
-}
-
-Function Get-AWSPublicIPRanges {
-	<#
-		.SYNOPSIS
-			Gets the public IP ranges AWS uses.
-
-		.DESCRIPTION
-			The cmdlet queries the ip-ranges.json file AWS provides and filters the results based on the selected services and/or regions. If no filter
-			values are provided, all of the results are returned. The results contain the IP prefix, the region, and the service.
-
-		.PARAMETER Services
-			The list of AWS services to filter the results on.
-
-		.PARAMETER Regions
-			The list of AWS regions to filter the results on.
-
-		.EXAMPLE
-			Get-AWSPublicIPRanges
-			
-			Gets all of the public IP prefixes AWS has.
-
-		.EXAMPLE
-			Get-AWSPublicIPRanges -Services @("EC2", "S3")
-
-			Gets the public IP ranges used by EC2 and S3.
-
-		.EXAMPLE
-			Get-AWSPublicIPRanges -Services EC2 -Regions @([Amazon.RegionEndpoint]::USEast1, [Amazon.RegionEndpoint]::USEast2)
-
-			Gets the public IP ranges used by EC2 in us-east-1 and us-east-2.
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			System.Management.Automation.PSCustomObject[]
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 8/3/2017
-	#>
-	[CmdletBinding()]
-	Param(
-		[Parameter()]
-		[ValidateSet("AMAZON", "ROUTE53_HEALTHCHECKS", "S3", "EC2", "ROUTE53", "CLOUDFRONT")]
-		[System.String[]]$Services = @(),
-
-		[Parameter()]
-		[ValidateNotNull()]
-        [Amazon.RegionEndpoint[]]$Regions = @()
-	)
-
-	Begin {
-	}
-
-	Process {
-		$Content = Invoke-WebRequest -Uri $script:IPRangeUrl -Method Get | Select-Object -ExpandProperty Content | ConvertFrom-Json | Select-Object -ExpandProperty prefixes
-
-		#[System.Net.WebClient]$Client = New-Object -TypeName System.Net.WebClient
-		#$Json = $Client.DownloadString($script:IPRangeUrl)
-		#$Content = ConvertFrom-Json -InputObject $Json | Select-Object -ExpandProperty prefixes
-		
-		if ($Regions.Length -gt 0)
-		{
-			$Content = $Content | Where-Object {$_.region -in ($Regions | Select-Object -ExpandProperty SystemName) }
-		}
-
-		if ($Services.Length -gt 0)
-		{
-			$Content = $Content | Where-Object {$_.service -in $Services}
-		}
-
-		Write-Output -InputObject ($Content | Sort-Object -Property service,region)
-	}
-
-	End {
-	}
-}
 
 Function Get-AWSCloudTrailLogs {
 	<#
@@ -5371,7 +4249,8 @@ Function Get-AWSCloudTrailLogs {
     Process {
         Initialize-AWSDefaults
 
-        if ($Region -eq $null) {
+        if ($Region -eq $null) 
+		{
             $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
         }
 
@@ -6399,12 +5278,6 @@ Function Get-AWSSupportCaseList {
 	}
 
 	Process {
-		Initialize-AWSDefaults
-
-        if ($Region -eq $null) {
-            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
-        }
-
         [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
 
 		[System.Collections.Hashtable]$CaseSplat = @{}
@@ -6501,18 +5374,18 @@ Function Get-AWSSupportCaseList {
 					} while ($CommNextToken -ne $null)
 				}
 
-				#CaseId               : case-490416305747-muen-2017-5dc8d9fa34a8e740
-				#CategoryCode         : instance-issue
-				#CcEmailAddresses     : {trusahoo@in.ibm.com, navin.nagar@in.ibm.com}
-				#DisplayId            : 4306238771
-				#Language             : en
-				#RecentCommunications : Amazon.AWSSupport.Model.RecentCaseCommunications
-				#ServiceCode          : amazon-elastic-compute-cloud-linux
-				#SeverityCode         : low
-				#Status               : resolved
-				#Subject              : Chat: High utilization traffic on Singapore location
-				#SubmittedBy          : aws-dl-490416305747-admin@blackboard.com
-				#TimeCreated          : 2017-08-22T14:41:48.000Z
+				# CaseId               : case-490416305747-muen-2017-5dc8d9fa34a8e740
+				# CategoryCode         : instance-issue
+				# CcEmailAddresses     : {john@contoso.com, jeff@contoso.com}
+				# DisplayId            : 4306238771
+				# Language             : en
+				# RecentCommunications : Amazon.AWSSupport.Model.RecentCaseCommunications
+				# ServiceCode          : amazon-elastic-compute-cloud-linux
+				# SeverityCode         : low
+				# Status               : resolved
+				# Subject              : Chat: High utilization traffic on Singapore location
+				# SubmittedBy          : aws-dl-490416305747-admin@blackboard.com
+				# TimeCreated          : 2017-08-22T14:41:48.000Z
 
                 $Results += ([PSCustomObject]@{
                     CaseId = $Case.CaseId
@@ -6792,26 +5665,32 @@ Function Get-AWSVpcPeeringSummary {
 	}
 }
 
-Function Get-AWSIAMRoleSummary {
+
+
+
+
+Function Update-EC2InstanceAmiId {
 	<#
 		.SYNOPSIS
-			Retrieves a summary about the specified role(s) or all roles in an account.
+			Changes the AMI id of a currently launched instance.
 
 		.DESCRIPTION
-			This cmdlet retrieves details about specified roles or all roles in an account. The details include all inline and managed policy documents,
-			the assume role policy document, name, arn, created date, path, etc. If a specified role is not found, the cmdlet produces a warning, but
-			can throw an exception if the -ErrorAction parameter is set to stop.
+			The cmdlet stops the source EC2 instance, detaches its EBS volumes and ENIs (except eth0), terminates the instance, launches a new EC2 instance with the specified AMI id and any configuration items like sriovsupport enabled, stops it, deletes its EBS volumes, attaches the source volumes and ENIs, and restarts the new EC2 instance.
 
-		.PARAMETER RoleNames
-			The name of a role or multiple roles to retrieve a summary of. If this parameter is not specified, all roles in the account are retrieved.
+		.PARAMETER InstanceId
+			The id of the instance to get.
 
-		.PARAMETER PathPrefix
-			The path prefix for filtering the IAM roles processed. For example, the prefix /application_abc/component_xyz/ gets all roles whose path starts with /application_abc/component_xyz/.
+		.PARAMETER InstanceName
+			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
 
-			If it is not included, it defaults to a slash (/), listing all roles.
+		.PARAMETER NewAmiId
+			The new AMI id to launch the EC2 instance with.
+
+		.PARAMETER Timeout
+			The amount of time in seconds to wait for each action to succeed. This defaults to 600.
 
 		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
 
 		.PARAMETER AccessKey
 			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
@@ -6837,209 +5716,42 @@ Function Get-AWSIAMRoleSummary {
 		.PARAMETER ProfileName
 			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
 
-		.EXAMPLE 
-			$IAMRoles = Get-AWSIAMRoleSummary -ProfileName "my-lab"
-
-			Gets a summary of all the IAM roles and their policies in the account specified by the my-lab credentials profile.
-
 		.EXAMPLE
-			Get-AWSIAMRoleSummary -PathPrefix /caa-roles/ -ProfileName "my-lab"
+			Update-EC2InstanceAmiId -InstanceId i-123456789012 -NewAmiId "ami-123456789012"
 
-			Gets a summary of the IAM roles and their policies in the /caa-roles/ path inside the account specified by the my-lab credentials profile.
-
-		.EXAMPLE 
-			Get-AWSIAMRoleSummary -RoleNames "PowerUserRole","AdministratorRole" -ProfileName "my-lab"
-
-			Gets a summary of the PowerUserRole and AdministratorRole IAM roles and their policies inside the account specified by the my-lab credentials profile.
+			Changes the AMI id being used for the specified instance
 
 		.INPUTS
 			None
 
 		.OUTPUTS
-			System.Management.Automation.PSCustomObject[]
+			None
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 12/19/2017
+			LAST UPDATE: 6/30/2017
 	#>
-	[CmdletBinding(DefaultParameterSetName = "Name")]
-	[OutputType([System.Management.Automation.PSCustomObject[]])]
+	[CmdletBinding()]
 	Param(
-		[Parameter(ParameterSetName = "Name")]
+		[Parameter(Mandatory = $true)]
 		[ValidateNotNullOrEmpty()]
-		[System.String[]]$RoleNames,
+		[System.String]$NewAmiId,
 
-		[Parameter(ParameterSetName = "Prefix")]
+		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
+		[Alias("Name")]
 		[ValidateNotNullOrEmpty()]
-		[ValidatePattern("(?:^\/$|(?:\/\S+\/)+)")]
-		[System.String]$PathPrefix = "/",
+		[System.String]$InstanceName,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceId,
 
 		[Parameter()]
-        [ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileName = [System.String]::Empty,
+		[System.Int32]$Timeout = 600,
 
 		[Parameter()]
 		[ValidateNotNull()]
-		[System.String]$AccessKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SecretKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SessionToken = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.Runtime.AWSCredentials]$Credential = $null,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-	Begin {
-	}
-
-	Process {
-		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		
-		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
-		$AccountId = $Identity.Account
-
-		[PSCustomObject[]]$AccountRoles = @()
-
-		if (-not $PSBoundParameters.ContainsKey("RoleNames") -or $RoleNames.Length -eq 0)
-		{
-			# Path prefix defaults to "/", which lists all roles
-			[Amazon.IdentityManagement.Model.Role[]]$RoleNames = Get-IAMRoleList -PathPrefix $PathPrefix @SourceSplat
-		}
-		
-		$i = 0
-
-		foreach ($IAMRole in $RoleNames)
-		{
-			$i++
-			$Percent = [System.Math]::Round(($i / $RoleNames.Length) * 100, 2)
-			Write-Progress -Activity "Processing Roles" -Status "Processing $i of $($RoleNames.Length) IAM Roles, $Percent% Complete" -PercentComplete $Percent
-
-			[System.String[]]$RolePolicies = @()
-
-			try
-			{
-				[System.String[]]$InlinePolicies = Get-IAMRolePolicyList -RoleName $IAMRole.RoleName @SourceSplat
-
-				foreach ($InlinePolicy in $InlinePolicies)
-				{
-					[Amazon.IdentityManagement.Model.GetRolePolicyResponse]$GetPolicyResult = Get-IAMRolePolicy -PolicyName $InlinePolicy -RoleName $IAMRole.RoleName @SourceSplat
-					$RolePolicies += "`"$($GetPolicyResult.PolicyName)`":$($GetPolicyResult.PolicyDocument)"
-				}
-
-				[Amazon.IdentityManagement.Model.AttachedPolicyType[]]$AttachedPolicies = Get-IAMAttachedRolePolicyList -RoleName $IAMRole.RoleName @SourceSplat
-
-				foreach ($AttachedPolicy in $AttachedPolicies)
-				{
-					[Amazon.IdentityManagement.Model.ManagedPolicy]$ManagedPolicy = Get-IAMPolicy -PolicyArn $AttachedPolicy.PolicyArn @SourceSplat
-					[Amazon.IdentityManagement.Model.PolicyVersion]$GetManagedPolicyResult = Get-IAMPolicyVersion -PolicyArn $ManagedPolicy.Arn -VersionId $ManagedPolicy.DefaultVersionId @SourceSplat
-					$RolePolicies += "`"$($ManagedPolicy.Arn)`":$($GetManagedPolicyResult.Document)"
-				}
-
-				$Policies = [System.Net.WebUtility]::UrlDecode([System.String]::Join(",", $RolePolicies))
-				$Policies = ConvertTo-Json -InputObject (ConvertFrom-Json -InputObject "{$Policies}") -Compress -Depth 10
-
-				$AccountRoles += [PSCustomObject]@{
-					RoleId = $IAMRole.RoleId;
-					RoleName = $IAMRole.RoleName;
-					Arn = $IAMRole.Arn;
-					AccountId = $AccountId;
-					CreateDate = $IAMRole.CreateDate;
-					Path = $IAMRole.Path;
-					AssumeRolePolicyDocument = ConvertTo-Json -InputObject (ConvertFrom-Json -InputObject ([System.Net.WebUtility]::UrlDecode($IAMRole.AssumeRolePolicyDocument))) -Compress -Depth 10
-					Policies = $Policies
-				}
-			}
-			catch [System.InvalidOperationException]
-			{
-				if ($_.Exception.InnerException -ne $null -and $_.Exception.InnerException -is [Amazon.IdentityManagement.Model.NoSuchEntityException])
-				{
-					if ($ErrorActionPreference -ne [System.Management.Automation.ActionPreference]::Stop)
-					{
-						Write-Warning -Message "$($_.Exception.InnerException.Message)"
-					}
-					else
-					{
-						throw $_.Exception
-					}
-				}
-				else
-				{
-					throw $_.Exception
-				}
-			}
-		}
-
-		Write-Progress -Activity "Processing Roles" -Completed
-
-		Write-Output -InputObject $AccountRoles
-	}
-
-	End {
-
-	}
-}
-
-Function Get-AWSVPCEndpointsByLocation {
-	<#
-		.PARAMETER CopyToClipboard
-			Copies the output to the clipboard as a JSON string.
-
-		.PARAMETER AsJson
-			Outputs as a JSON string instead of a PSCustomObject. Use this JSON as a Mapping element in CloudFormation to see if an endpoint service is available in a specific region or AZ.
-
-		.PARAMETER ByAvailabilityZone
-			This specifies which endpoints are available by AZ instead of by region.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-
-	#>
-    [CmdletBinding()]
-    Param(
-        [Parameter()]
-        [Switch]$CopyToClipboard,
-
-        [Parameter()]
-        [Switch]$AsJson,
-
-        [Parameter()]
-        [Switch]$ByAvailabilityZone,
+		[Amazon.RegionEndpoint]$Region,
 
 		[Parameter()]
 		[ValidateNotNull()]
@@ -7064,74 +5776,1478 @@ Function Get-AWSVPCEndpointsByLocation {
 		[Parameter()]
 		[ValidateNotNull()]
 		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+
+		$InstanceSplat = @{}
+
+		if ($PSCmdlet.ParameterSetName -eq "Id")
+		{
+			Write-Verbose -Message "Using instance id $InstanceId."
+			$InstanceSplat.Add("InstanceId", $InstanceId)
+		}
+		else
+		{
+			Write-Verbose -Message "Using instance name $InstanceName."
+			$InstanceSplat.Add("InstanceName", $InstanceName)
+		}
+
+		# Get the source EC2 instance
+		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
+	
+		# Stop the source EC2 instance
+		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
+
+		[PSCustomObject[]]$BlockDevices = @()
+
+		# Detach all EBS volumes from the source machine
+		
+		foreach ($BlockDevice in $Instance.BlockDeviceMappings)
+		{
+			$BlockDevices += [PSCustomObject]@{Volume = Get-EC2Volume -VolumeId $BlockDevice.Ebs.VolumeId @Splat; DeviceName = $BlockDevice.DeviceName}
+
+			Dismount-EC2Volume -InstanceId $Instance.InstanceId -VolumeId $BlockDevice.Ebs.VolumeId @Splat | Out-Null
+		}
+
+		while (($BlockDevices | Select-Object -ExpandProperty Volume | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Count -ne $BlockDevices.Count)
+		{
+			Write-Verbose -Message "Waiting for volumes to detach."
+
+			for ($i = 0; $i -lt $BlockDevices.Length; $i++)
+			{
+				$BlockDevices[$i].Volume = Get-EC2Volume -VolumeId $BlockDevices[$i].Volume.VolumeId @Splat
+			}
+
+			Start-Sleep -Seconds 5
+		}
+
+		# Detach all the additional network interfaces
+
+		[PSCustomObject[]]$Interfaces = @()
+
+		foreach ($Interface in ($Instance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -ne 0}))
+		{
+			$Interfaces += [PSCustomObject]@{ DeviceIndex = $Interface.Attachment.DeviceIndex; Interface = $Interface}
+
+			Write-Verbose -Message "Dismounting interface $($Interface.NetworkInterfaceId) at index $($Interface.Attachment.DeviceIndex) from the source instance."				
+			Dismount-EC2NetworkInterface -AttachmentId $Interface.Attachment.AttachmentId @Splat | Out-Null
+		}
+
+		if ($Interfaces.Count -gt 0)
+		{
+			# While the count of interfaces whose status is available is not equal to the count of interfaces
+			# keep waiting until they are all available
+			# Use a minus 1 on Interfaces count since we are not detaching the interface at index 0
+			while ((($Interfaces | Select-Object -ExpandProperty Interface | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::Available }).Count -ne $Interfaces.Count - 1)
+			{
+				Write-Verbose -Message "Waiting for all network interfaces to detach."
+
+				# Start at 1 since index 0 isn't being detached
+				for ($i = 1; $i -lt $Interfaces.Length; $i++)
+				{
+					$Interfaces[$i].Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Interfaces[$i].NetworkInterfaceId @Splat
+				}
+
+				Start-Sleep -Seconds 5
+			}
+		}
+
+		Write-Verbose -Message "Deleting the original instance."
+		Write-Host -Object "Original instance AMI id: $($Instance.ImageId)"
+
+		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State TERMINATE -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
+
+		# Build some optional parameters for New-EC2Instance
+		[System.Collections.Hashtable]$NewInstanceSplat = @{}
+
+		if ($Instance.InstanceLifecycle -ne $null)
+		{
+			$NewInstanceSplat.InstanceLifecycle = $Instance.InstanceLifecycle
+		}
+
+		# Windows instances won't have a kernel id
+		if (-not [System.String]::IsNullOrEmpty($Instance.KernelId))
+		{
+			$NewInstanceSplat.KernelId = $Instance.KernelId
+		}
+
+		# Copy all of the tags from the source insance
+		if ($Instance.Tags.Count -gt 0)
+		{
+			[Amazon.EC2.Model.TagSpecification]$Tags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
+
+			$Tags.ResourceType = [Amazon.EC2.ResourceType]::Instance
+
+			$Tags.Tags = $Instance.Tags
+
+			$NewInstanceSplat.TagSpecification = $Tags
+		}
+
+		# Copy placement info for affinity, placement group, and host id
+		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.Affinity))
+		{
+			$NewInstanceSplat.Affinity = $Instance.Placement.Affinity
+		}
+
+		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.GroupName))
+		{
+			$NewInstanceSplat.PlacementGroup = $Instance.Placement.GroupName
+		}
+
+		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.HostId))
+		{
+			$NewInstanceSplat.HostId = $Instance.Placement.HostId
+		}
+
+		# This specifies if detailed monitoring is enabled
+
+		if ($Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Enabled -or $Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Pending)
+		{
+			$NewInstanceSplat.Monitoring_Enabled = $true
+		}
+
+		if ($Instance.EbsOptimized -eq $true)
+		{
+			$NewInstanceSplat.EbsOptimized = $true
+		}
+		
+		Write-Verbose -Message @"
+Launching new instance:
+	Type:              $($Instance.InstanceType)
+	Subnet:            $($Instance.SubnetId)
+	Security Groups:   $([System.String]::Join(",", ($Instance.SecurityGroups | Select-Object -ExpandProperty GroupId)))
+	AZ:                $($Instance.Placement.AvailabilityZone)
+	IAM Profile:       $($Instance.IamInstanceProfile.Arn)
+	Private IP:        $($Instance.PrivateIPAddress)
+	Tenancy:           $($Instance.Placement.Tenancy)
+"@
+
+		[Amazon.EC2.Model.Instance]$NewInstance = $null
+
+		$Temp = New-EC2Instance -ImageId $NewAmiId `
+						-AssociatePublicIp (-not [System.String]::IsNullOrEmpty($Instance.PublicIpAddress)) `
+						-KeyName $Instance.KeyName `
+						-SecurityGroupId ($Instance.SecurityGroups | Select-Object -ExpandProperty GroupId) `
+						-SubnetId $Instance.SubnetId `
+						-InstanceType $Instance.InstanceType `
+						-AvailabilityZone $Instance.Placement.AvailabilityZone `
+						-Tenancy $Instance.Placement.Tenancy `
+						-InstanceProfile_Arn $Instance.IamInstanceProfile.Arn `
+						-PrivateIpAddress $Instance.PrivateIpAddress `
+						@NewInstanceSplat @Splat
+
+		if ($Temp -eq $null)
+		{
+			throw "Could not create the new instance."
+		}
+
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $Temp.Instances[0].InstanceId @AwsUtilitiesSplat
+
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
+
+		Write-Verbose -Message "Stopping new instance."
+
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
+
+		if (-not [System.String]::IsNullOrEmpty($Instance.SriovNetSupport))
+		{
+			Write-Verbose -Message "Enabling SrIovNetSupport"
+			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -SriovNetSupport $Instance.SriovNetSupport @Splat | Out-Null
+		}
+
+		if ($Instance.EnaSupport -eq $true)
+		{
+			Write-Verbose -Message "Enabling ENA"
+			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -EnaSupport $true @Splat | Out-Null
+		}
+
+		# Update the interface at index 0 because we can't specify New-EC2Instance with both a set of security groups for the instance
+		# in addition to security groups for the ENI as well as a specific subnet for the instance and ENI
+
+		[Amazon.EC2.Model.InstanceNetworkInterface]$RootNetDevice = $NewInstance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -eq 0} | Select-Object -First 1
+		[Amazon.EC2.Model.InstanceNetworkInterface]$SourceRootInterface = $Interfaces | Where-Object {$_.DeviceIndex -eq 0} | Select-Object -First 1 -ExpandProperty Interface
+
+		[System.Collections.Hashtable]$InterfaceSplat = @{}
+
+		if ($SourceRootInterface.SourceDestCheck -ne $null)
+		{
+			$InterfaceSplat.SourceDestCheck = $SourceRootInterface.SourceDestCheck
+		}
+
+		if (-not [System.String]::IsNullOrEmpty($SourceRootInterface.Description))
+		{
+			$InterfaceSplat.Description = $SourceRootInterface.Description
+		}
+
+		if ($SourceRootInterface.Groups.Count -gt 0)
+		{
+			$InterfaceSplat.Groups = ($SourceRootInterface.Groups | Select-Object -ExpandProperty GroupId) 
+		}
+
+		if ($InterfaceSplat.Count -gt 0)
+		{
+			Write-Verbose -Message "Updated primary network interface attributes."
+			Edit-EC2NetworkInterfaceAttribute -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId `
+											@InterfaceSplat `
+											@Splat | Out-Null
+		}
+
+		# If the source machine had multiple IPs on the root ENI, add those IPs back
+		if ($SourceRootInterface.PrivateIpAddresses.Count -gt 1)
+		{
+			Write-Verbose -Message "Adding secondary IP addresses to root network interface."
+			Register-EC2PrivateIpAddress -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId -PrivateIpAddress ($SourceRootInterface.PrivateIpAddresses | Where-Object {$_.Primary -eq $false} | Select-Object -ExpandProperty PrivateIpAddress) @Splat | Out-Null
+		}
+								
+		[Amazon.EC2.Model.NetworkInterface[]]$InterfacesToDelete = @()
+
+		foreach ($Interface in ($NewInstance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -ne 0 }))
+		{
+			$InterfacesToDelete += Get-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId @Splat
+			Write-Verbose -Message "Dismounting network interface $($Interface.NetworkInterfaceId) from new instance."
+			Dismount-EC2NetworkInterface -AttachmentId $Interface.Attachment.AttachmentId @Splat | Out-Null
+		}
+
+		if ($InterfacesToDelete.Count -gt 0)
+		{
+			while ((($InterfacesToDelete | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::Available }).Count -ne $InterfacesToDelete.Count)
+			{
+				Write-Verbose -Message "Waiting for all network interfaces to detach."
+
+				for ($i = 0; $i -lt $InterfacesToDelete.Length; $i++)
+				{
+					$InterfacesToDelete[$i] = Get-EC2NetworkInterface -NetworkInterfaceId $InterfacesToDelete[$i].NetworkInterfaceId @Splat
+				}
+
+				Start-Sleep -Seconds 5
+			}
+
+			foreach ($Interface in $InterfacesToDelete)
+			{
+				Write-Verbose -Message "Deleting interface $($Interface.NetworkInterfaceId)."
+				Remove-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId -Force @Splat | Out-Null
+			}
+		}
+
+		# Update the value we have after all the interfaces have been updated, removed, and/or deleted
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
+
+		if ($Interfaces.Count -gt 0)
+		{
+			Write-Verbose -Message "Adding network interfaces to the new instance."
+
+			foreach ($Interface in $Interfaces)
+			{
+				Write-Verbose -Message "Adding $($Interface.Interface.NetworkInterfaceId) at index $($Interface.DeviceIndex)."
+				Add-EC2NetworkInterface -InstanceId $NewInstance.InstanceId -NetworkInterfaceId $Interface.Interface.NetworkInterfaceId -DeviceIndex $Interface.DeviceIndex @Splat | Out-Null
+			}
+
+			while ((($Interfaces | Select-Object -ExpandProperty Interface | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::InUse }).Count -ne $Interfaces.Count)
+			{
+				Write-Verbose -Message "Waiting for all network interfaces to be in use."
+
+				for ($i = 0; $i -lt $Interfaces.Count; $i++)
+				{
+					$Interfaces[$i].Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Interfaces[$i].Interface.NetworkInterfaceId @Splat
+				}
+
+				Start-Sleep -Seconds 5
+			}
+		}
+
+		# Update again after new interfaces have been added
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
+
+		Write-Verbose -Message "Removing EBS volumes from the new instance."
+
+		[Amazon.EC2.Model.Volume[]]$VolumesToDelete = @()
+
+		foreach ($BlockDevice in $NewInstance.BlockDeviceMappings)
+		{
+			Write-Verbose -Message "Dismounting device $($BlockDevice.Ebs.VolumeId) at $($BlockDevice.DeviceName)."
+			Dismount-EC2Volume -InstanceId $NewInstance.InstanceId -VolumeId $BlockDevice.Ebs.VolumeId @Splat | Out-Null
+
+			$VolumesToDelete += Get-EC2Volume -VolumeId $BlockDevice.Ebs.VolumeId @Splat
+		}
+
+		if ($VolumesToDelete.Count -gt 0)
+		{
+			while (($VolumesToDelete | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Count -ne $VolumesToDelete.Length)
+			{
+				Write-Verbose -Message "Waiting for volumes to become available."
+
+				for ($i = 0; $i -lt $VolumesToDelete.Length; $i++)
+				{
+					$VolumesToDelete[$i] = Get-EC2Volume -VolumeId $VolumesToDelete[$i].VolumeId @Splat
+				}
+
+				Start-Sleep -Seconds 5
+			}
+
+			foreach ($Volume in $VolumesToDelete)
+			{
+				Write-Verbose -Message "Deleting new instance volume $($Volume.VolumeId)." 
+				Remove-EC2Volume -VolumeId $Volume.VolumeId -Force @Splat
+			}
+		}
+
+		# Update again after all volumes have been removed
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
+
+		Write-Verbose -Message "Adding original EBS volumes to new instance."
+
+		foreach ($BlockDevice in $BlockDevices)
+		{
+			Write-Verbose -Message "Adding $($BlockDevice.Volume.VolumeId) to device $($BlockDevice.DeviceName)."
+			Add-EC2Volume -InstanceId $NewInstance.InstanceId -Device $BlockDevice.DeviceName -VolumeId $BlockDevice.Volume.VolumeId @Splat | Out-Null
+		}
+
+		$Counter = 0
+
+		while (($BlockDevices | Select-Object -ExpandProperty Volume | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::InUse}).Count -ne $BlockDevices.Count -and $Counter -lt $Timeout)
+		{
+			Write-Verbose -Message "Waiting for volumes to be attached."
+
+			for ($i = 0; $i -lt $BlockDevices.Length; $i++)
+			{
+				$BlockDevices[$i].Volume = Get-EC2Volume -VolumeId $BlockDevices[$i].Volume.VolumeId @Splat
+			}
+
+			Start-Sleep -Seconds 5
+			$Counter += 5
+		}
+
+		if ($Counter -ge $Timeout)
+		{
+			throw "Timout waiting for volumes to be attached to the new instance."
+		}
+
+		Write-Verbose -Message "Starting instance."
+
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Force @AwsUtilitiesSplat 
+	}
+
+	End {
+
+	}
+}
+
+Function Invoke-EnableCloudWatch {
+	<#
+		.SYNOPSIS
+			Enables CloudWatch Logs and custom metrics on the local EC2 instance.
+
+		.DESCRIPTION
+			The cmdlet uses SSM or EC2Config to enable CloudWatch Logs and custom metrics. If a bucket and key are specified, the json config file is downloaded and used to configure the service. If the SSMDocument is specified, it is used with a state manager association.
+
+			If null or empty values are provided to bucket or key, the cmdlet creates an empty configuration file and enables EC2Config to send logs and metrics, but does not configure any.
+
+		.PARAMETER Key
+			The key of the object in S3 that is the config document for CloudWatch, this should be AWS.EC2.Windows.CloudWatch.json with any additional prefixes.
+
+		.PARAMETER Bucket
+			The bucket containing the configuration document.
+
+		.PARAMETER SSMDocument
+			The SSM Document to associate with the EC2 instance to enable CloudWatch.
+
+		.PARAMETER RestartServices
+			If specified, initiates a restart of either the SSMAgent or EC2Config service so that the new settings take effect. The service restart is executed as a scheduled task run by the SYSTEM account to ensure it succeeds and to prevent terminating being denied terminating the service because it is currently executing a script with this cmdlet.
+
+		.EXAMPLE
+			Invoke-EnableCloudWatch -Key AWS.EC2.Windows.CloudWatch.json -Bucket ec2configs -RestartServices
+			
+			Downloads the file from S3 with pre-existing CloudWatch configurations and restarts the appropriate service depending on the version of Windows (either SSM Agent or EC2Config).
+
+		.INPUTS
+			None
+
+		.OUTPUTS 
+			None
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/30/2017
+			
+	#>
+	[CmdletBinding(DefaultParameterSetName = "LocalConfig")]
+	Param(
+		[Parameter(ParameterSetName = "LocalConfig")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Key,
+
+		[Parameter(ParameterSetName = "LocalConfig")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Bucket,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "SSM")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$SSMDocument,
+
+		[Parameter()]
+		[switch]$RestartServices
+	)
+
+	Begin {
+	}
+
+	Process {
+		try
+		{
+			[System.String]$CloudWatchLogConfigDestination = "$env:ProgramFiles\Amazon\Ec2ConfigService\Settings\AWS.EC2.Windows.CloudWatch.json"
+			[System.String]$EC2SettingsFile="$env:ProgramFiles\Amazon\Ec2ConfigService\Settings\Config.xml"
+
+			Write-Host -Message "Enabling CloudWatch Logs."
+
+			$AWSSoftware = Get-AWSSoftware
+			$SSMSoftware = $AWSSoftware | Where-Object -FilterScript {$_.DisplayName -eq "Amazon SSM Agent"} | Select-Object -First 1
+			$EC2ConfigSW = $AWSSoftware | Where-Object -FilterScript {$_.DisplayName -eq "EC2ConfigService"} | Select-Object -First 1
+
+			if ($SSMSoftware -ne $null -and -not [System.String]::IsNullOrEmpty($SSMDocument))
+			{
+				Write-Host -Message "Using SSM to configure CloudWatch."
+					
+				$ServiceName = "AmazonSSMAgent"
+
+				$InstanceId = Get-EC2InstanceId
+
+				try
+				{
+					Write-Host -Message "Updating SSM agent to latest."
+					New-SSMAssociation -InstanceId $InstanceId -Name "AWS-UpdateSSMAgent" -Force
+				}
+				catch [Amazon.SimpleSystemsManagement.Model.AssociationAlreadyExistsException]
+				{
+					Write-Host -Message "The AWS-UpdateSSMAgent association already exists."
+				}
+
+				try
+				{
+					Write-Log -Message "Associating CloudWatch SSM Document $SSMDocument."
+					New-SSMAssociation -Target  @{Key="instanceids"; Values=@($InstanceId)} -Name $SSMDocument -Parameter @{"status" = "Enabled"} -Force
+				}
+					catch [Amazon.SimpleSystemsManagement.Model.AssociationAlreadyExistsException]
+					{
+						Write-Log -Message "The $CloudWatchSSMDocument association already exists."
+					}
+				}
+				elseif ($EC2ConfigSW -ne $null)
+				{
+					$ServiceName = "EC2Config"
+
+					Write-Log -Message "EC2Config Service Version $($EC2ConfigSW.DisplayVersion)"
+
+					if (-not [System.String]::IsNullOrEmpty($Bucket) -and -not [System.String]::IsNullOrEmpty($Key))
+					{
+						Write-Log -Message "Downloading CloudWatch configuration file."
+			
+						Copy-S3Object -BucketName $Bucket -Key $Key -LocalFile $CloudWatchLogConfigDestination -Force
+					}
+
+					if (-not (Test-Path -Path $CloudWatchLogConfigDestination))
+					{
+						$Val = @"
+{
+  "IsEnabled": true,
+  "EngineConfiguration": {
+    "PollInterval": "00:00:05",
+    "Components": [
+	],
+    "Flows": {
+      "Flows": [
+      ]
+    }
+  }
+}
+"@
+						Set-Content -Path $CloudWatchLogConfigDestination -Value $Val -Force
+					}
+
+
+					# Version is 0xMMmmBBB
+					[System.String]$Hex = $EC2ConfigSW.Version.ToString("X")
+
+					# The major and minor values are stored little endian, so they need to be flipped
+					# The build number is stored big endian
+					$Hex = $Hex.Substring(1, 1) + $Hex.Substring(0, 1)
+					$Major = [System.Int32]::Parse($Hex.Substring(0, 2), [System.Globalization.NumberStyles]::HexNumber)
+
+					# For EC2Config less than version 4, enabling CloudWatch has to be done in the XML config
+					if ($Major -lt 4)
+					{
+						Write-Log -Message "Ensuring the IsEnabled property isn't present in the config file."
+
+						[PSCustomObject]$Obj = ConvertFrom-Json -InputObject (Get-Content -Path $CloudWatchLogConfigDestination -Raw)
+					
+						if ($Obj.Properties.Name -icontains "IsEnabled")
+						{
+							$Obj.Properties.Remove("IsEnabled")
+							Set-Content -Path $CloudWatchLogConfigDestination -Value (ConvertTo-Json -InputObject $Obj) -Force
+						}
+
+						Write-Log -Message "Retrieving EC2Config settings file."
+			
+						[System.Xml.XmlDocument]$Xml = Get-Content -Path $EC2SettingsFile
+						$Xml.Get_DocumentElement().Plugins.ChildNodes | Where-Object {$_.Name -eq "AWS.EC2.Windows.CloudWatch.PlugIn"} | ForEach-Object { $_.State = "Enabled"}
+			
+						Write-Log -Message "Saving updated settings file."
+						$Xml.Save($EC2SettingsFile)
+					}
+					# Othwerwise it is done in the CloudWatch json file and SSM uses it to deliver logs and metrics
+					else
+					{
+						Write-Log -Message "Ensuring the IsEnabled property is present and set to true in the config file."
+
+						[PSCustomObject]$Obj = ConvertFrom-Json -InputObject (Get-Content -Path $CloudWatchLogConfigDestination -Raw)
+					
+						$Obj.IsEnabled = $true
+						Set-Content -Path $CloudWatchLogConfigDestination -Value (ConvertTo-Json -InputObject $Obj) -Force
+
+						$ServiceName = "AmazonSSMAgent"
+					}
+
+					if (-not $Reboot)
+					{
+						try 
+						{
+							$RestartServiceTaskName = "Restart$ServiceName`Task"
+  
+							Write-Log -Message "Creating scheduled task to restart $ServiceName service."
+
+							if ((Get-ScheduledTask -TaskName $RestartServiceTaskName -ErrorAction SilentlyContinue) -ne $null) 
+							{
+								Unregister-ScheduledTask -TaskName $RestartServiceTaskName -Confirm:$false
+							}
+
+							$Command = @"
+try {					
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Executing scheduled task $RestartServiceTaskName, waiting 30 seconds for other actions to complete."
+	Start-Sleep -Seconds 30
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Removing script file at $PSCommandPath."
+	Remove-Item -Path "$PSCommandPath" -Force
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Restarting $ServiceName service."
+	Restart-Service -Name $ServiceName -Force
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Unregistering scheduled task."
+	Unregister-ScheduledTask -TaskName $RestartServiceTaskName -Confirm:`$false
+	Add-Content -Path "$script:LogPath" -Value "[INFO] `$(Get-Date) : Successfully unregistered scheduled task, task complete."
+} 
+catch [Exception] {
+	Add-Content -Path "$script:LogPath" -Value "[ERROR] `$(Get-Date) : `$(`$_.Exception.Message)"
+	Add-Content -Path "$script:LogPath" -Value "[ERROR] `$(Get-Date) : `$(`$_.Exception.StackTrace)"
+}
+"@
+
+							$Bytes = [System.Text.Encoding]::Unicode.GetBytes($Command)
+							$EncodedCommand = [Convert]::ToBase64String($Bytes)
+        
+							$STParams = "-NonInteractive -WindowStyle Hidden -NoProfile -NoLogo -EncodedCommand $EncodedCommand"
+							$STSource =  "$env:SYSTEMROOT\System32\WindowsPowerShell\v1.0\powershell.exe"
+							$STAction = New-ScheduledTaskAction -Execute $STSource -Argument $STParams
+							$STPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+							$STSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -DontStopIfGoingOnBatteries -DontStopOnIdleEnd -MultipleInstances IgnoreNew
+                               
+							$ScheduledTask = Register-ScheduledTask -TaskName $RestartServiceTaskName -Action $STAction -Principal $STPrincipal -Settings $STSettings -ErrorAction Stop 
+							Start-ScheduledTask -TaskName $RestartServiceTaskName
+						}
+						catch [Exception] {
+							Write-Log -Message "Error running scheduled task to restart $ServiceName service." -ErrorRecord $_ -Level ERROR
+						}
+					}					
+				}
+				else
+				{
+					Write-Log -Message "The SSM Agent and the EC2Config service are both not installed, cannot configure CloudWatch." -Level WARNING
+				}
+			}
+			catch [Exception]
+			{
+				Write-Log -Message "Error configuring CloudWatch." -ErrorRecord $_ -Level ERROR
+			}
+		}
+
+		End {
+		}
+	}
+
+
+Function Copy-EBSVolume {
+    <#
+        .SYNOPSIS
+			Copies EBS volumes from a source to a destination.
+
+		.DESCRIPTION
+			This cmdlet creates EBS Volume snaphshots of a specified EBS volume, or volumes attached to an instance and then creates new EBS volumes
+			from those snapshots.
+
+			If a destination EC2 instance is not specified either by Id or name, the volumes are created in the destination region, but are not
+			attached to anything and the cmdlet will return details about the volumes.
+
+			The volumes are attached to the first available device on the EC2 instance starting at xvdf and will attach until xvdp.
+
+		.PARAMETER SourceInstanceId
+			The Id of the source EC2 instance to copy EBS volumes from.
+
+		.PARAMETER SourceEBSVolumeId
+			The Id of the source EBS volume to copy.
+
+		.PARAMETER SourceInstanceName
+			The name of the source EC2 instance to copy EBS volumes from. This matches against the Name tag value.
+
+		.PARAMETER DestinationInstanceId
+			The Id of the EC2 instance to attach the new volumes to.
+
+		.PARAMETER DestinationInstanceName
+			The name of the destination EC2 instance to attach the new volumes to. This matches against the Name tag value.
+
+		.PARAMETER OnlyRootDevice
+			Only copies the root/boot volume from the source EC2 instance.
+
+		.PARAMETER DeleteSnapshots
+			The intermediary snapshots will be deleted. If this is not specified, they will be left.
+
+		.PARAMETER DestinationRegion
+			The region the new volumes should be created in. This must be specified if the destination instance
+			is in a different region. This parameter defaults to the source region.
+
+		.PARAMETER AvailabilityZone
+			The AZ in which the new volume(s) should be created. If this is not specified, the AZ is determined by the AZ the source volume
+			is in if the new volume is being created in the same region. If the volume is being created in a different region, the AZ of 
+			the indicated destination EC2 instance is used. If a destination EC2 instance isn't specified, then the first available AZ of the
+			region will be used.
+
+		.PARAMETER Timeout
+			The amount of time in seconds to wait for each snapshot and volume to be created. This defaults to 900 seconds (15 minutes).
+
+		.PARAMETER KmsKeyId
+			If you specify this, the resulting EBS volumes will be encrypted using this KMS key. You don't need to specify the EncryptNewVolumes parameter if you provide this one.
+
+		.PARAMETER EncryptNewVolumes
+			This will encrypt the resulting volumes using the default AWS KMS key.	
+
+		.PARAMETER VolumeType
+			You can specify a single volume type for all newly created volumes. If this parameter is not specified, the source volume attributes are used to create the new volume, including the number of provisioned IOPS.
+
+		.PARAMETER Iops
+			Only valid for Provisioned IOPS SSD volumes when you specify Io1 for the VolumeType parameter. The number of I/O operations per second (IOPS) to provision for the volume, with a maximum ratio of 50 IOPS/GiB. Constraint: Range is 100 to 20000 for Provisioned IOPS SSD volumes.
+
+		.PARAMETER VolumeSize
+			If the source is an EBS Volume Id, or the OnlyRootDevice parameter is specified, a new Volume size can be specified for the resulting volume in GiBs. The size must be greater than or equal to the source.
+
+			Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
+
+		.PARAMETER CopyTags 
+			Specify this to copy the current tag values from the source volume(s) to the destination volume(s) and intermediate EBS snapshots.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DeleteSnapshots -ProfileName mycredprofile -Verbose -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
+			
+			Copies the EBS volumes from server1 in the region specified in the mycredprofile AWS credential profile as the default region to us-east-2. 
+
+		.EXAMPLE
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DestinationInstanceName server2 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
+			
+			Copies the EBS volume(s) from server1 in us-west-2 and attaches them to server2 in us-east-2. 
+
+		.EXAMPLE
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
+			
+			Copies the EBS volume(s) from server1 in us-west-2 to us-east-2. The new volumes are unattached.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			Amazon.EC2.Model.Volume[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/14/2019
+    #>
+    [CmdletBinding()]
+    Param(
+		[Parameter(ParameterSetName = "SourceByInstanceId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceId", Mandatory = $true)]
+        [System.String]$SourceInstanceId,
+
+		[Parameter(ParameterSetName = "SourceByVolumeId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByVolumeId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByVolumeId", Mandatory = $true)]
+        [System.String]$SourceEBSVolumeId,
+
+		[Parameter(ParameterSetName = "SourceByInstanceName", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceName", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceName", Mandatory = $true)]
+        [System.String]$SourceInstanceName,
+
+        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByVolumeId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceName", Mandatory = $true)]
+        [System.String]$DestinationInstaceId,
+
+        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByVolumeId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceName", Mandatory = $true)]
+        [System.String]$DestinationInstanceName,
+
+        [Parameter()]
+        [Switch]$OnlyRootDevice,
+
+        [Parameter()]
+        [switch]$DeleteSnapshots,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AvailabilityZone = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$DestinationRegion,
+
+		[Parameter()]
+		[System.UInt32]$Timeout = 900,
+
+		[Parameter()]
+		[Switch]$EncryptNewVolumes,
+
+		[Parameter()]
+		[Amazon.EC2.VolumeType]$VolumeType,
+
+		[Parameter()]
+		[ValidateRange(100, 20000)]
+		[System.Int32]$Iops,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$KmsKeyId = [System.String]::Empty,
+
+		[Parameter()]
+		[Switch]$CopyTags
     )
+
+	DynamicParam 
+	{
+		[System.Management.Automation.RuntimeDefinedParameterDictionary]$ParamDictionary = New-Object -TypeName System.Management.Automation.RuntimeDefinedParameterDictionary
+
+		# If we're only targetting a single EBS volume, we can specify a new size
+		if ($PSBoundParameters.ContainsKey("SourceEBSVolumeId") -or $PSBoundParameters.ContainsKey("OnlyRootDevice"))
+		{
+			New-DynamicParameter -Name "VolumeSize" -Type ([System.Int32]) -ValidateRange @(1, 16384) -RuntimeParameterDictionary $ParamDictionary | Out-Null
+		}
+
+		Write-Output -InputObject $ParamDictionary
+	}
 
     Begin {
     }
 
     Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1 -and -not $PSBoundParameters.ContainsKey("Iops"))
+		{
+			throw "You must specify a number of IOPS if the destination volumes are of type Io1."			
+		}
+
+		# Map the common AWS parameters
+		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$SourceAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
+
+		if (-not $PSBoundParameters.ContainsKey("Region"))
+		{
+			$Region = [Amazon.RegionEndpoint]::GetBySystemName($SourceSplat.Region)
+		}
 		
-        $Mapping =  [PSCustomObject]@{}
+		# Map the common parameters, but with the destination Region
+		[System.Collections.Hashtable]$DestinationSplat = New-AWSSplat -Region $DestinationRegion -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation
+		[System.Collections.Hashtable]$DestinationAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $DestinationSplat
 
-        Get-AWSRegion -IncludeChina -IncludeGovCloud @Splat | Select-Object -ExpandProperty Region | ForEach-Object {
-            $Region = $_
+		# If the user did not specify a destination region, use the source region
+		# which could be specified, or be the default
+		if (-not $PSBoundParameters.ContainsKey("DestinationRegion"))
+		{
+			$DestinationSplat.Region = $SourceSplat.Region
+			$DestinationAWSUtilitiesSplat.Region = $SourceAWSUtilitiesSplat.Region
+			$DestinationRegion = [Amazon.RegionEndpoint]::GetBySystemName($DestinationSplat.Region)
+		}
 
-            Write-Verbose -Message "Processing region: $Region"
-        
-            if ($ByAvailabilityZone)
-            {
-                Get-EC2AvailabilityZone -Region $Region @Splat | Select-Object -ExpandProperty ZoneName | ForEach-Object {
-                    $Zone = $_
-                    $Mapping | Add-Member -Name $Zone -Value ([PSCustomObject]@{}) -MemberType NoteProperty
-                }
+		# The first step is to get the volume Ids attached to the instance we are trying to copy data from
+        [Amazon.EC2.Model.Volume[]]$EBSVolumes = @()
+
+        switch -Wildcard ($PSCmdlet.ParameterSetName) {
+            "*SourceByInstanceName" {
+
+				[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId -Name $SourceInstanceName @SourceAWSUtilitiesSplat
+
+				if ($Instance -ne $null)
+				{
+					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
+					{
+						$AvailabilityZone = $Instance.Placement.AvailabilityZone
+						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
+					}
+
+					if ($OnlyRootDevice)
+					{
+						$EBSVolumes = $Instance.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | Select-Object -First 1 -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId	| Get-EC2Volume @SourceSplat
+					}
+					else
+					{
+						$EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
+					}                        
+				}
+
+                break
             }
-            else
-            {
-                $Mapping | Add-Member -Name $Region -Value ([PSCustomObject]@{}) -MemberType NoteProperty
-            }
-        
-            Get-EC2VpcEndpointService -Region $Region @Splat | Select-Object -ExpandProperty ServiceDetails | ForEach-Object {
-                [Amazon.EC2.Model.ServiceDetail]$Detail = $_
-
-                $Name = $Detail.ServiceName.Substring($Detail.ServiceName.IndexOf($Region) + $Region.Length).Replace(".", "").Replace("-", "")
+            "*SourceByInstanceId" {
                 
-                if ($ByAvailabilityZone)
+                # This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
+                # so save the error output and don't strongly type it
+                [Amazon.EC2.Model.Instance]$Instance  = Get-EC2InstanceByNameOrId -InstanceId $SourceInstanceId @SourceAWSUtilitiesSplat
+
+                if ($Instance -ne $null)
                 {
-                    Get-EC2AvailabilityZone -Region $Region @Splat | Select-Object -ExpandProperty ZoneName | ForEach-Object {                  
-                        $Zone = $_
-                        $Mapping.$Zone | Add-Member -Name $Name -Value ($Detail.AvailabilityZones -contains $Zone) -MemberType NoteProperty
+					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
+					{
+						$AvailabilityZone = $Instance.Placement.AvailabilityZone
+						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
+					}
+
+                    if ($OnlyRootDevice)
+                    {
+						$EBSVolumes = $Instance.BlockDeviceMappings | `
+							Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | `
+							Select-Object -ExpandProperty Ebs | `
+							Select-Object -First 1 -ExpandProperty VolumeId	| `
+							Get-EC2Volume @SourceSplat
                     }
+                    else
+                    {
+                        $EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
+                    }                       
+                }
+
+                break
+            }
+            "*SourceByVolumeId" {
+				# This check just ensures the EC2 EBS volume exists
+
+                [Amazon.EC2.Model.Volume]$Volume = Get-EC2Volume -VolumeId $SourceEBSVolumeId @SourceSplat
+                
+                if ($Volume -ne $null)
+                {
+                    $EBSVolumes = @($Volume)
+
+				    # Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
+				    {
+					    $AvailabilityZone = $Volume.AvailabilityZone
+						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
+				    }
                 }
                 else
                 {
-                    $Mapping.$Region | Add-Member -Name $Name -Value 
+                    throw "[ERROR] Could not find a volume matching $SourceEBSVolumeId"
                 }
-            }           
-        }
 
-        if ($AsJson)
-        {
-            $Json = $Mapping | ConvertTo-Json
-            Write-Output -InputObject $Json          
-
-            if ($CopyToClipboard)
-            {
-                $Json | Set-Clipboard
+                break
+            }
+            default {
+                throw "Could not determine parameter set name"
             }
         }
-        else
-        {
-            Write-Output -InputObject $Mapping
 
-            if ($CopyToClipboard)
-            {
-                $Json = $Mapping | ConvertTo-Json
-                $Json | Set-Clipboard
+		# Test this here so we can throw early and not go through creating snapshots before we find this out
+		# The dynamic param VolumeSize should only be added if there is 1 source volume, but
+		# but let's make sure
+		# Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
+		if ($PSBoundParameters.ContainsKey("VolumeSize") -and $EBSVolumes.Length -eq 1)
+		{
+			[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
+
+			foreach ($Vol in $EBSVolumes)
+			{
+				if ($Size -lt $Vol.Size)
+				{
+					throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($Vol.Size) GiB for $($Vol.VolumeId)."
+				}
+
+				# We don't need to check the other types since they all use the same upper limit, which was checked by the 
+				# parameter validation, and the value can't be less than the minimum since the existing volumes must comply
+				# with that minimum
+				if ($Vol.VolumeType -eq [Amazon.EC2.VolumeType]::Standard -and $Size -gt 1024)
+				{
+					throw "The specified size, $Size GiB, is greater than 1024, the maximum size for the Standard volume type."				
+				}
+			}
+		}
+
+		# Retrieve the destination EC2 instance
+		# This needs to come after the instance retrieval because it may
+		# update the destination AZ
+        [Amazon.EC2.Model.Instance]$Destination = $null
+
+        switch -Wildcard ($PSCmdlet.ParameterSetName)
+        {
+            "DestinationByName*" {
+				$Destination = Get-EC2InstanceByNameOrId -Name $DestinationInstanceName @DestinationAWSUtilitiesSplat
+				$AvailabilityZone = $Destination.Placement.AvailabilityZone
+
+                break
+            }
+            "DestinationById*" {
+                $Destination = Get-EC2InstanceByNameOrId -InstanceId $DestinationInstaceId @DestinationAWSUtilitiesSplat
+				$AvailabilityZone = $Destination.Placement.AvailabilityZone
+
+                break
+            }
+            default {
+                Write-Verbose -Message "A destination is not provided, so just creating the snapshots and volumes"
+
+				# If the AZ hasn't been specified previously because this is a cross region
+				# move, select a default one for the destination region
+                if ([System.String]::IsNullOrEmpty($AvailabilityZone))
+                {
+                    $AvailabilityZone = Get-EC2AvailabilityZone -Region $DestinationRegion.SystemName | Where-Object {$_.State -eq [Amazon.EC2.AvailabilityZoneState]::Available} | Select-Object -First 1 -ExpandProperty ZoneName
+                    Write-Verbose -Message "Using a default AZ in the destination region since a destination instance and AZ were not specified: $AvailabilityZone"
+                }
             }
         }
+
+		# This will be used in the snapshot description
+		[System.String]$Purpose = [System.String]::Empty
+
+		if ($Destination -ne $null)
+		{
+			$Purpose = $Destination.InstanceId
+		}
+		else
+		{
+			$Purpose = $DestinationRegion.SystemName
+		}
+
+		# Create the snapshots at the source
+
+        [Amazon.EC2.Model.Snapshot[]]$Snapshots = $EBSVolumes | ForEach-Object {
+			[Amazon.EC2.Model.Snapshot]$Snap = New-EC2Snapshot -VolumeId $_.VolumeId @SourceSplat -Description "TEMPORARY for $Purpose"
+
+			if ($CopyTags)
+			{
+				New-EC2Tag -Resource $Snap.SnapshotId -Tag $_.Tags @SourceSplat
+			}
+
+			Write-Output -InputObject $Snap
+		}
+
+		# Using a try here so the finally step will always delete the snapshots if specified
+		try
+		{
+			# Reset the counter for the next loop
+			$Counter = 0
+
+			# While all of the snapshots have not completed, wait
+			while (($Snapshots | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
+			{
+				$Completed = (($Snapshots | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $Snapshots.Length) * 100
+				Write-Progress -Activity "Creating snapshots" -Status "$Completed% Complete:" -PercentComplete $Completed
+
+				# Update their statuses
+				for ($i = 0; $i -lt $Snapshots.Length; $i++)
+				{
+					if ($Snapshots[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
+					{
+						Write-Verbose -Message "Waiting on snapshot $($Snapshots[$i].SnapshotId) to complete, currently at $($Snapshots[$i].Progress) in state $($Snapshots[$i].State)"
+						$Snapshots[$i] = Get-EC2Snapshot -SnapshotId $Snapshots[$i].SnapshotId @SourceSplat
+					}
+				}
+
+				Start-Sleep -Seconds 1
+				$Counter++
+			}
+
+			Write-Progress -Completed -Activity "Creating snapshots"
+
+			if ($Counter -ge $Timeout)
+			{
+				throw "Timeout waiting for snapshots to be created."
+			}
+			else
+			{
+				Write-Verbose -Message "All of the snapshots have completed."
+			}
+
+			[Amazon.EC2.Model.Snapshot[]]$SnapshotsToCreate = @()
+
+			# Reset the counter for the next loop
+			$Counter = 0
+
+			# If this is a cross region move, copy the snapshots over, or if we are going to encrypt the new volumes, create copies
+			if (($DestinationRegion.SystemName -ne $Region.SystemName) -or $EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))
+			{
+				Write-Verbose -Message "Copying snapshots from $($SourceSplat.Region) to $($DestinationSplat.Region) using encryption: $($EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))"
+
+				# Create the encryption splat
+				[System.Collections.Hashtable]$EncryptionSplat = @{}
+
+				if ($EncryptNewVolumes)
+				{
+					$EncryptionSplat.Add("Encrypted", $true)
+				}
+										  
+				if (-not [System.String]::IsNullOrEmpty($KmsKeyId))
+				{
+					$EncryptionSplat.Add("KmsKeyId", $KmsKeyId)
+				}
+
+				# Copy the Snapshots and get the new copied snapshot objects back
+				$SnapshotsToCreate = $Snapshots | ForEach-Object {
+					[System.String]$Id = Copy-EC2Snapshot -SourceSnapshotId $_.SnapshotId -SourceRegion $SourceSplat.Region -Description "COPY OF TEMPORARY for $Purpose" @DestinationSplat @EncryptionSplat
+					[Amazon.EC2.Model.Snapshot]$Snap = Get-EC2Snapshot -SnapshotId $Id @DestinationSplat
+					$Snap.VolumeId = $_.VolumeId
+
+					if ($CopyTags)
+					{
+						New-EC2Tag -Resource $Id -Tag ($EBSVolumes | Where-Object {$_.VolumeId -eq $Snap.VolumeId } | Select-Object -First 1 -ExpandProperty Tags) @DestinationSplat
+					}
+
+					Write-Output -InputObject $Snap
+				}
+
+				# While all of the snapshots have not completed, wait
+				while (($SnapshotsToCreate | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
+				{
+					$Completed = (($SnapshotsToCreate | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $SnapshotsToCreate.Length) * 100
+					Write-Progress -Activity "Creating snapshot copies" -Status "$Completed% Complete:" -PercentComplete $Completed
+
+					# Update their statuses
+					for ($i = 0; $i -lt $SnapshotsToCreate.Length; $i++)
+					{
+						if ($SnapshotsToCreate[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
+						{
+							# This will ensure we have a VolumeId later that we can check on
+							# to compare the copied snapshot with the original volume
+							$TempVolId = $SnapshotsToCreate[$i].VolumeId
+							Write-Verbose -Message "Waiting on snapshot $($SnapshotsToCreate[$i].SnapshotId) copy to complete, currently at $($SnapshotsToCreate[$i].Progress) in state $($SnapshotsToCreate[$i].State)"
+							$SnapshotsToCreate[$i] = Get-EC2Snapshot -SnapshotId $SnapshotsToCreate[$i].SnapshotId @DestinationSplat
+							$SnapshotsToCreate[$i].VolumeId = $TempVolId
+						}
+					}
+
+					Start-Sleep -Seconds 1
+					$Counter++
+				}
+
+				Write-Progress -Completed -Activity "Creating snapshots"
+
+				if ($Counter -ge $Timeout)
+				{
+					throw "Timeout waiting for snapshots to be copied to new region."
+				}
+				else
+				{
+					Write-Verbose -Message "All of the copied snapshots have completed."
+				}
+			}
+			else
+			{
+				# Not a cross region move, so assign the current snapshots to the variable
+				# that we will evaluate to create the volumes from
+
+				$SnapshotsToCreate = $Snapshots
+
+				# Empty the original array to be able to identify what needs
+				# to be deleted later, otherwise the finally block will try to delete the 
+				# same snapshots twice
+				$Snapshots = @()
+			}
+
+			# Create the new volumes from the newly created snapshots
+			# The destination splat will either have the new region if it was specified or will be the same as the source region
+			# The AZ was determined from the source instance if the source and destination region were the same, otherwise
+			# the AZ was selected from the Destination instance, if one was provided, if it wasn't, then a default AZ for the new region
+			# was selected
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = $SnapshotsToCreate | ForEach-Object {
+				[System.Collections.Hashtable]$NewVolumeSplat = @{}
+
+				# Make sure we use the right volume type for the destination
+				if ($PSBoundParameters.ContainsKey("VolumeType"))
+				{
+					$NewVolumeSplat.Add("VolumeType", $VolumeType)
+
+					if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
+					{
+						# Make sure the maximum of 50 IOPS to GiB isn't exceeded
+						if ($Iops -le ($_.VolumeSize * 50))
+						{
+							$NewVolumeSplat.Add("Iops", $Iops)
+						}
+						else
+						{
+							Write-Warning -Message "The desired IOPS for the snapshot from $($_.VolumeId) exceed the maximum ratio of 50 IOPS / GiB. This has been throttled to $([System.Math]::Floor($_.VolumeSize) * 50)"
+							$NewVolumeSplat.Add("Iops", [System.Math]::Floor($_.VolumeSize) * 50)
+						}
+					}
+				}
+				else
+				{
+					Write-Verbose -Message "Retrieving source volume attributes for volume $($_.VolumeId)."
+					[Amazon.EC2.Model.Volume]$SourceVolume = $EBSVolumes | Where-Object {$_.VolumeId -eq $_.VolumeId} | Select-Object -First 1
+					$NewVolumeSplat.Add("VolumeType", $SourceVolume.VolumeType)
+
+					if ($SourceVolume.VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
+					{
+						$NewVolumeSplat.Add("Iops", $SourceVolume.Iops)
+					}
+				}
+
+				# The dynamic param VolumeSize should only be added if there is 1 source, but
+				# but let's make sure. We also validated earlier than if there was 1 source and this
+				# parameter was specified, that it wasn't smaller than the current volume size
+				if ($PSBoundParameters.ContainsKey("VolumeSize") -and $SnapshotsToCreate.Length -eq 1)
+				{
+					[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
+
+					# This check is probably unnecessary here since we checked earlier, but can't hurt
+					if ($Size -ge $_.VolumeSize)
+					{
+						$NewVolumeSplat.Add("Size", $Size)
+					}
+					else
+					{
+						throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($_.VolumeSize) GiB."
+					}
+				}
+
+				[Amazon.EC2.Model.Volume]$NewVol = New-EC2Volume -SnapshotId $_.SnapshotId -AvailabilityZone $AvailabilityZone @DestinationSplat @NewVolumeSplat
+
+				if ($CopyTags)
+				{
+					[Amazon.EC2.Model.TagDescription[]]$Tags = Get-EC2Tag -Filter @{Name="resource-id"; Value=$NewVol.VolumeId} @DestinationSplat
+					New-EC2Tag -Resource $NewVol.VolumeId -Tag $Tags @DestinationSplat
+				}
+
+				Write-Output -InputObject $NewVol
+			}
+
+			# Reset the counter for the next loop
+			$Counter = 0
+
+			# Wait for the new volumes to become available before we try to attach them
+			while (($NewVolumes | Where-Object {$_.State -ne [Amazon.EC2.VolumeState]::Available}) -ne $null -and $Counter -lt $Timeout)
+			{
+				$Completed = (($NewVolumes | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Length / $NewVolumes.Length) * 100
+				Write-Progress -Activity "Creating volumes" -Status "$Completed% Complete:" -PercentComplete $Completed
+			
+				for ($i = 0; $i -lt $NewVolumes.Length; $i++)
+				{
+					if ($NewVolumes[$i].State -ne [Amazon.EC2.VolumeState]::Available)
+					{
+						Write-Verbose -Message "Waiting on volume $($NewVolumes[$i].VolumeId) to become available, currently $($NewVolumes[$i].State)"
+						$NewVolumes[$i] = Get-EC2Volume -VolumeId $NewVolumes[$i].VolumeId @DestinationSplat
+					}
+				}
+
+				Start-Sleep -Seconds 1
+				$Counter++
+			}
+
+			Write-Progress -Completed -Activity "Creating volumes"
+
+			if ($Counter -ge $Timeout)
+			{
+				throw "Timeout waiting for volumes to be created."
+			}
+			else
+			{
+				Write-Verbose -Message "All of the new volumes are available."
+			}
+
+			# Check if a destination instance was specified
+			if ($Destination -ne $null)
+			{
+				Write-Verbose -Message "Mounting volumes."
+				Mount-EBSVolumes -VolumeIds ($NewVolumes | Select-Object -ExpandProperty VolumeId) -NextAvailableDevice -Instance $Destination @DestinationAWSUtilitiesSplat
+			}
+			elseif ($PSCmdlet.ParameterSetName -like ("DestinationBy*"))
+			{
+				# This means a destination instance was specified, but we didn't
+				# find it in the Get-EC2Instance cmdlet
+				Write-Warning -Message "[ERROR] Could not find the destination instance"
+			}
+
+            Write-Output -InputObject $NewVolumes					
+		}
+		finally
+		{		
+			if ($DeleteSnapshots)
+			{
+				# Delete the original source Region snapshots if there are any
+				if ($Snapshots -ne $null -and $Snapshots.Length -gt 0)
+				{
+					Write-Verbose -Message "Deleting snapshots $([System.String]::Join(",", ($Snapshots | Select-Object -ExpandProperty SnapshotId)))"
+					$Snapshots | Remove-EC2Snapshot @SourceSplat -Confirm:$false
+				}
+
+				if ($SnapshotsToCreate -ne $null -and $SnapshotsToCreate.Length -gt 0)
+				{
+					Write-Verbose -Message "Deleting snapshots $([System.String]::Join(",", ($SnapshotsToCreate | Select-Object -ExpandProperty SnapshotId)))"
+					$SnapshotsToCreate | Remove-EC2Snapshot @DestinationSplat -Confirm:$false
+				}
+			}
+		}
     }
 
     End {
     }
+}
+
+Function Mount-EBSVolumes {
+	<#
+		.SYNOPSIS
+			Mounts a set of available EBS volumes to an instance.
+
+		.DESCRIPTION
+			The cmdlet can mount one to many available EBS volumes to an EC2 instance. The destination instance
+			can be provided as an EC2 object or by instance id. The mount point device can be specified directly
+			or the next available device is used. If the device is specified directly and is in use, or if multiple
+			volumes are specified, the provided device is used as a starting point to find the next available device.
+
+		.PARAMETER VolumeIds
+			The Ids of the volumes to attach. The must be in an available status.
+
+		.PARAMETER NextAvailableDevice
+			Specifies that the cmdlet will find the next available device between xvdf and xvdp.
+
+		.PARAMETER Device
+			Specify the device that the volume will be attached at. If multiple volumes are specified, this is the starting
+			point to find the next available device for each.
+
+		.PARAMETER InstanceId
+			The id of the instance to attach the volumes to.
+
+		.PARAMETER Instance
+			The Amazon.EC2.Model.Instance object to attach the volumes to.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Mount-EBSVolumes -VolumeIds vol-04d16ab9a1b07449g -InstanceId i-057bd4fe22eced7bb -Region ([Amazon.RegionEndpoint]::USWest1)
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			None
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 6/5/2017
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
+		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
+		[ValidateNotNull()]
+		[System.String[]]$VolumeIds,
+
+		[Parameter(ParameterSetName = "InputObjectAndNextAvailable", Mandatory = $true)]
+		[Parameter(ParameterSetName = "IdAndNextAvailable", Mandatory = $true)]
+		[switch]$NextAvailableDevice,
+
+		[Parameter(ParameterSetName = "InputObjectAndDevice", Mandatory = $true)]
+		[Parameter(ParameterSetName = "IdAndDevice", Mandatory = $true)]
+		[ValidateSet("xvdf", "xvdg", "xvdh", "xvdi", "xvdj",
+			"xvdk", "xvdl", "xvdm", "xvdn", "xvdo", "xvdp")]
+		[System.String]$Device,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndDevice")]
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceId,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndDevice")]
+		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
+		[Amazon.EC2.Model.Instance]$Instance,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)		
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		if ($PSCmdlet.ParameterSetName.StartsWith("Id"))
+		{
+			$Destination = Get-EC2Instance -InstanceId $InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
+		}
+
+		[System.String]$DeviceBase = "xvd"
+		[System.Int32]$CurrentLetter = 0
+
+		if ($NextAvailableDevice)
+		{
+			#If you map an EBS volume with the name xvda, Windows does not recognize the volume.
+			$CurrentLetter = [System.Int32][System.Char]'f'
+		}
+		else
+		{
+			$CurrentLetter = [System.Int32][System.Char]$Device.Substring($Device.Length - 1)
+		}
+
+		#Iterate all of the new volumes and attach them
+		foreach ($Item in $VolumeIds)
+		{
+			try
+			{
+				$Destination = Get-EC2Instance -InstanceId $Destination.InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
+				[System.String[]]$Devices = $Destination.BlockDeviceMappings | Select-Object -ExpandProperty DeviceName
+
+				#Try to find an available device
+				while ($Devices.Contains($DeviceBase + [System.Char]$CurrentLetter) -and [System.Char]$CurrentLetter -ne 'q')
+				{
+					$CurrentLetter++
+				}
+
+				#The last usable letter is p
+				if ([System.Char]$CurrentLetter -ne 'q')
+				{
+					Write-Verbose -Message "Attaching $Item to $($Destination.InstanceId) at device $DeviceBase$([System.Char]$CurrentLetter)"
+                        
+					#The cmdlet will create the volume as the same size as the snapshot
+					[Amazon.EC2.Model.VolumeAttachment]$Attachment = Add-EC2Volume -InstanceId $Destination.InstanceId -VolumeId $Item -Device ($DeviceBase + [System.String][System.Char]$CurrentLetter) @Splat
+					Write-Verbose -Message "Attached at $($Attachment.AttachTime)"
+                    
+					#Increment the letter so the next check doesn't try to use the same device
+					$CurrentLetter++
+				}
+				else
+				{
+					#Break out of the iteration because we can't mount any more drives
+					Write-Warning -Message "No available devices left to mount the device"
+					break
+				}
+			}
+			catch [Exception]
+			{
+				Write-Warning -Message "[ERROR] Could not attach volume $($Item.VolumeId) with error $($_.Exception.Message)"
+			}
+		}
+	}
+
+	End {
+	}
 }
