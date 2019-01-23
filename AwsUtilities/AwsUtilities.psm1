@@ -925,6 +925,313 @@ Function Get-EC2CurrentImageIds {
 	}
 }
 
+Function Move-EC2Instance {
+	<#
+		.SYNOPSIS
+			Moves an EC2 instance from a source region to a different target region as an AMI.
+
+		.DESCRIPTION
+			This cmdlet moves 1 or more EC2 instances from a source region to a different target region by creating a new AMI of the source in the
+			target region. The user will then need to manually deploy the EC2 instance into the desired VPC from the AMI. The cmdlet will also optionally
+			cleanup the source region region by deleting the source EC2 instance(s) and source AMI(s).
+
+			Each specified instance will be stopped before having an AMI created from it to ensure consistency of all EBS volumes.
+
+		.PARAMETER InstanceIds
+			The source EC2 instance(s) to move.
+
+		.PARAMETER DestinationRegion
+			The region the new AMIs will be created in.
+
+		.PARAMETER Encrypt
+			Specifies that the destination AMIs will use encrypted EBS volumes that use the default KMS key for that region.
+
+        .PARAMETER KmsKeyId
+			If you specify this, the resulting AMIs will be encrypted using this KMS key. You don't need to specify the Encrypt parameter if you provide this one.
+
+		.PARAMETER Cleanup
+			If specified, the source EC2 instances and source AMIs that are created will all be deleted once the destination AMIs have been successfully created.
+
+        .PARAMETER Wait
+            If specified, the cmdlet will wait for the final AMIs to be created before returning.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked and that the source EC2 instances are in. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$AMIs = Move-EC2Instance -InstanceIds @("i-033b1455fc5c3b386") -DestinationRegion ([Amazon.RegionEndpoint]::UsEast1) -Region ([Amazon.RegionEndpoint]::UsEast2) -CleanupSource -ProfileName "mylab"
+		
+			This example moves the instance i-033b1455fc5c3b386 to us-east-1 from us-east-2 and deletes the source instance and its intermediate AMI. The resulting AMI id is returned to the pipeline.
+
+		.INPUTS
+			System.String[]
+
+		.OUTPUTS
+			Amazon.EC2.Model.Image[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/23/2019
+	#>
+	[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "HIGH")]
+	[OutputType([Amazon.EC2.Model.Image[]])]
+	Param(
+		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[System.String[]]$InstanceIds,
+
+		[Parameter(Mandatory = $true)]
+		[Amazon.RegionEndpoint]$DestinationRegion,
+
+		[Parameter(ParameterSetName = "KMS")]
+		[Switch]$Encrypted,
+
+        [Parameter(ParameterSetName = "CustomKMS")]
+		[ValidateNotNull()]
+		[System.String]$KmsKeyId = [System.String]::Empty,
+
+		[Parameter()]
+		[Switch]$CleanupSource,
+
+		[Parameter()]
+		[Switch]$Force,
+
+        [Parameter()]
+        [Switch]$Wait,
+
+		[Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+
+	}
+
+	Process {
+        [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$DestinationSplat = New-AWSSplat -Region $DestinationRegion -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$UtilSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
+        [System.Collections.Hashtable]$SourceImageIdToInstanceIdMap = @{}
+        [System.String[]]$SourceInstanceIdsToDelete = @()
+
+		$ConfirmMessage = "Are you sure you want to stop and copy $($InstanceIds.Length) EC2 instance$(if ($Instances.Length -gt 1){"s"}) from $Region to $DestinationRegion`?"
+
+		$WhatIfDescription = "Stopped and moved $($InstanceIds.Length) EC2 instance$(if ($Instances.Length -gt 1){"s"}) from $Region to $DestinationRegion."
+		$ConfirmCaption = "Move Instances"
+
+		if ($Force -or $PSCmdlet.ShouldProcess($WhatIfDescription, $ConfirmMessage, $ConfirmCaption))
+		{
+            [System.Collections.Generic.Queue[Amazon.EC2.Model.Instance]]$WaitingToStop = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.Instance]
+            [System.Collections.Generic.Queue[Amazon.EC2.Model.Image]]$SourceAMIs = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.Image]
+            [Amazon.EC2.Model.Image[]]$FinalAMIs = @()
+
+			foreach ($Id in $InstanceIds)
+			{
+				Write-Verbose -Message "Stopping instance $Id."
+				Set-EC2InstanceState -InstanceId $Id -State STOP -Force @UtilSplat 
+				$WaitingToStop.Enqueue((Get-EC2InstanceByNameOrId -InstanceId $Id @UtilSplat))
+			}
+
+            while ($WaitingToStop.Count -gt 0)
+			{
+				Write-Verbose -Message "Waiting for all instances to stop."
+
+                [Amazon.EC2.Model.Instance]$Instance = $WaitingToStop.Dequeue()
+
+                switch ($Instance.State.Name)
+                {
+                    ([Amazon.EC2.InstanceStateName]::Stopped) {
+                        Write-Verbose -Message "Instance $($Instance.InstanceId) is stopped."
+
+                        try
+				        {
+							Write-Verbose -Message "Creating new AMI for $($Instance.InstanceId)."
+							$Desc = Get-EC2Image -ImageId $Instance.ImageId @SourceSplat | Select-Object -ExpandProperty Name
+
+							$Name = $Instance.InstanceId
+
+							if (($Instance.Tags | Where-Object {$_.Key -ieq "Name"}).Length -gt 0)
+							{
+								$Name = $Instance.Tags | Where-Object {$_.Key -ieq "Name"} | Select-Object -First 1 -ExpandProperty Value
+							}
+
+							$ImageId = New-EC2Image -InstanceId $Instance.InstanceId -Name $Name -Description $Desc @SourceSplat
+							Write-Verbose -Message "New AMI is $ImageId."
+							$SourceAMIs.Enqueue((Get-EC2Image -ImageId $ImageId @SourceSplat))
+                            $SourceImageIdToInstanceIdMap.Add($ImageId, $Instance.InstanceId)
+						}
+						catch [Exception] 
+						{
+							Write-Warning -Message "Could not create a new image for $($Instance.InstanceId):`r`n$(ConvertTo-Json -InputObject $_.Exception)"
+						}
+
+                        break
+                    }
+                    ([Amazon.EC2.InstanceStateName]::Terminated) {
+                        throw "Instance $($Instance.InstanceId) has been terminated and cannot be moved."
+                    }
+                    default {
+                        $WaitingToStop.Enqueue($Instance)
+                    }
+                }
+
+                if ($WaitingToStop.Count -gt 0 -and ($WaitingToStop | Where-Object { $_.State.Name -eq [Amazon.EC2.InstanceStateName]::Stopped }).Count -ne $WaitingToStop.Count)
+                {
+                    Write-Verbose -Message "All remaining instances have not stopped, sleeping to allow them to finish stopping."
+                    Start-Sleep -Seconds 10
+                    $Arr = $WaitingToStop.ToArray()
+
+                    $WaitingToStop = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.Instance]
+
+                    for ($i = 0; $i -lt $Arr.Length; $i++)
+                    {
+                        $WaitingToStop.Enqueue((Get-EC2InstanceByNameOrId -InstanceId $Arr[$i].InstanceId @UtilSplat))
+                    }
+                }
+            }
+
+            [System.String[]]$SourceImageIdsToDeleteAtCleanup = @()
+
+			while ($SourceAMIs.Count -gt 0)
+			{
+				[Amazon.EC2.Model.Image]$Image = $SourceAMIs.Dequeue()
+
+                switch ($Image.State)
+                {
+                    ([Amazon.EC2.ImageState]::Available) {
+                        Write-Verbose -Message "Copying AMI $($Image.ImageId) from $Region to $DestinationRegion."
+						
+                        [System.Collections.Hashtable]$EncryptSplat = @{}
+
+                        if ($Encrypted)
+                        {
+                            $EncryptSplat.Add("Encrypted", $true)
+                        }
+                        elseif (-not [System.String]::IsNullOrEmpty($KmsKeyId))
+                        {
+                            $EncryptSplat.Add("KmsKeyId", $KmsKeyId)
+                        }
+
+						$NewAmiId = Copy-EC2Image -SourceImageId $Image.ImageId -Description $Image.Description -Name $Image.Name -SourceRegion $SourceSplat.Region @DestinationSplat @EncryptSplat
+                        $FinalAMIs += (Get-EC2Image -ImageId $NewAmiId @DestinationSplat)
+                        $SourceImageIdsToDeleteAtCleanup += $Image.ImageId
+                        
+                        $SourceInstanceIdsToDelete += $SourceImageIdToInstanceIdMap[$Image.ImageId]
+                        
+                        break
+                    }
+                    {$_ -in @([Amazon.EC2.ImageState]::Failed, [Amazon.EC2.ImageState]::Deregistered, [Amazon.EC2.ImageState]::Error, [Amazon.EC2.ImageState]::Invalid)} {
+                        throw "The EC2 image $($Image.ImageId) is in state $($Image.State) and cannot be copied."
+                    }
+                    default {
+                        $SourceAMIs.Enqueue($Image)
+                    }
+                }					
+
+                if ($SourceAMIs.Count -gt 0 -and ($SourceAMIs | Where-Object { $_.State -ne [Amazon.EC2.ImageState]::Available }).Count -eq $SourceAMIs.Count)
+                {
+                    Write-Verbose -Message "All remaining images have not become available yet, sleeping to allow them to finish creating."
+                    Start-Sleep -Seconds 10
+                    $Arr = $SourceAMIs.ToArray()
+
+                    $SourceAMIs = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.Image]
+
+                    for ($i = 0; $i -lt $Arr.Length; $i++)
+                    {
+                        $SourceAMIs.Enqueue((Get-EC2Image -ImageId $Arr[$i].ImageId @SourceSplat))
+                    }
+                }
+			}
+
+            while (($FinalAMIs | Where-Object {$_.ImageState -eq [Amazon.EC2.ImageState]::Available}).Count -ne $FinalAMIs.Count)
+            {
+                Write-Verbose -Message "Waiting for final AMIs to finish creation"
+                Start-Sleep -Seconds 10
+
+                for ($i = 0; $i -lt $FinalAMIs.Count; $i++)
+                {
+                    if ($FinalAMIs[$i].ImageState -ne [Amazon.EC2.ImageState]::Available)
+                    {
+                        $FinalAMIs[$i] = Get-EC2Image -ImageId $FinalAMIs[$i].ImageId @DestinationSplat
+                    }
+                }
+            }
+
+			if ($CleanupSource)
+			{
+				Write-Verbose -Message "Deleting source EC2 instances."
+				
+                foreach ($Id in $SourceInstanceIdsToDelete)
+				{
+					Write-Verbose -Message "Deleting instance $Id."
+					Set-EC2InstanceState -InstanceId $Id -State TERMINATE -Force @UtilSplat
+				}
+
+				Write-Verbose -Message "Deleting source AMIs."
+
+				foreach ($Id in $SourceImageIdsToDeleteAtCleanup)
+				{
+					Write-Verbose -Message "Deleting AMI $Id."
+					Unregister-EC2Image -ImageId $Id @SourceSplat
+				}
+			}
+
+			Write-Output -InputObject $FinalAMIs
+		}
+	}
+
+	End {
+	}
+}
+
 #endregion
 
 #region IAM Functions
@@ -1984,6 +2291,965 @@ Function New-EBSAutomatedSnapshot {
 		{ 
 			Write-EBSLog -Message "Volume snapshot job completed."
 			Write-EBSLog -Message "*******************************************************************************" -NoTimeStamp
+		}
+	}
+
+	End {
+	}
+}
+
+Function Copy-EBSVolume {
+    <#
+        .SYNOPSIS
+			Copies EBS volumes from a source to a destination.
+
+		.DESCRIPTION
+			This cmdlet creates EBS Volume snaphshots of a specified EBS volume, or volumes attached to an instance and then creates new EBS volumes from those snapshots.
+
+			If a destination EC2 instance is not specified either by Id or name, the volumes are created in the destination region, but are not attached to anything and the cmdlet will return details about the volumes.
+
+			The volumes are attached to the first available device on the EC2 instance starting at xvdf and will attach until xvdp for Windows or /dev/sdf through /dev/sdp for Linux.
+
+            If the source EBS volume(s) are encrypted, the snapshots and resulting new volumes will also be encrypted. If the destination is a different region, the default KMS key will be used, unless one is specified. If the destination is the same region, the same KMS key will be used, unless a different one is specified.
+
+		.PARAMETER SourceInstanceId
+			The Id of the source EC2 instance to copy EBS volumes from.
+
+		.PARAMETER SourceEBSVolumeId
+			The Id of the source EBS volume to copy.
+
+		.PARAMETER SourceInstanceName
+			The name of the source EC2 instance to copy EBS volumes from. This matches against the Name tag value.
+
+		.PARAMETER DestinationInstanceId
+			The Id of the EC2 instance to attach the new volumes to.
+
+		.PARAMETER DestinationInstanceName
+			The name of the destination EC2 instance to attach the new volumes to. This matches against the Name tag value.
+
+		.PARAMETER OnlyRootDevice
+			Only copies the root/boot volume from the source EC2 instance.
+
+		.PARAMETER DeleteSnapshots
+			The intermediary snapshots will be deleted. If this is not specified, they will be left.
+
+		.PARAMETER DestinationRegion
+			The region the new volumes should be created in. This must be specified if the destination instance is in a different region. This parameter defaults to the source region.
+
+		.PARAMETER AvailabilityZone
+			The AZ in which the new volume(s) should be created. If this is not specified, the AZ is determined by the AZ the source volume
+			is in if the new volume is being created in the same region. If the volume is being created in a different region, the AZ of 
+			the indicated destination EC2 instance is used. If a destination EC2 instance isn't specified, then the first available AZ of the
+			region will be used.
+
+		.PARAMETER Timeout
+			The amount of time in seconds to wait for each snapshot and volume to be created. This defaults to 900 seconds (15 minutes).
+
+		.PARAMETER KmsKeyId
+			If you specify this, the resulting EBS volumes will be encrypted using this KMS key. You don't need to specify the EncryptNewVolumes parameter if you provide this one.
+
+		.PARAMETER EncryptNewVolumes
+			This will encrypt the resulting volumes using the default AWS KMS key. You do not need to specify this if the source volume(s) are already encrypted. The resulting copies will also be encrypted.	
+
+		.PARAMETER VolumeType
+			You can specify a single volume type for all newly created volumes. If this parameter is not specified, the source volume attributes are used to create the new volume, including the number of provisioned IOPS.
+
+		.PARAMETER Iops
+			Only valid for Provisioned IOPS SSD volumes when you specify Io1 for the VolumeType parameter. The number of I/O operations per second (IOPS) to provision for the volume, with a maximum ratio of 50 IOPS/GiB. Constraint: Range is 100 to 20000 for Provisioned IOPS SSD volumes.
+
+		.PARAMETER VolumeSize
+			If the source is an EBS Volume Id, or the OnlyRootDevice parameter is specified, a new Volume size can be specified for the resulting volume in GiBs. The size must be greater than or equal to the source.
+
+			Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
+
+		.PARAMETER CopyTags 
+			Specify this to copy the current tag values from the source volume(s) to the destination volume(s) and intermediate EBS snapshots.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DeleteSnapshots -ProfileName mycredprofile -Verbose -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
+			
+			Copies the EBS volumes from server1 in the region specified in the mycredprofile AWS credential profile as the default region to us-east-2. 
+
+		.EXAMPLE
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DestinationInstanceName server2 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
+			
+			Copies the EBS volume(s) from server1 in us-west-2 and attaches them to server2 in us-east-2. 
+
+		.EXAMPLE
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
+			
+			Copies the EBS volume(s) from server1 in us-west-2 to us-east-2. The new volumes are unattached.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			Amazon.EC2.Model.Volume[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/23/2019
+    #>
+    [CmdletBinding()]
+    Param(
+		[Parameter(ParameterSetName = "SourceByInstanceId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceId", Mandatory = $true)]
+        [System.String]$SourceInstanceId,
+
+		[Parameter(ParameterSetName = "SourceByVolumeId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByVolumeId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByVolumeId", Mandatory = $true)]
+        [System.String]$SourceEBSVolumeId,
+
+		[Parameter(ParameterSetName = "SourceByInstanceName", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceName", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceName", Mandatory = $true)]
+        [System.String]$SourceInstanceName,
+
+        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByVolumeId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceName", Mandatory = $true)]
+        [System.String]$DestinationInstaceId,
+
+        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByVolumeId", Mandatory = $true)]
+        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceName", Mandatory = $true)]
+        [System.String]$DestinationInstanceName,
+
+        [Parameter()]
+        [Switch]$OnlyRootDevice,
+
+        [Parameter()]
+        [switch]$DeleteSnapshots,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AvailabilityZone = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$DestinationRegion,
+
+		[Parameter()]
+		[System.UInt32]$Timeout = 900,
+
+		[Parameter()]
+		[Switch]$EncryptNewVolumes,
+
+		[Parameter()]
+		[Amazon.EC2.VolumeType]$VolumeType,
+
+		[Parameter()]
+		[ValidateRange(100, 20000)]
+		[System.Int32]$Iops,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$KmsKeyId = [System.String]::Empty,
+
+		[Parameter()]
+		[Switch]$CopyTags
+    )
+
+	DynamicParam 
+	{
+		[System.Management.Automation.RuntimeDefinedParameterDictionary]$ParamDictionary = New-Object -TypeName System.Management.Automation.RuntimeDefinedParameterDictionary
+
+		# If we're only targetting a single EBS volume, we can specify a new size
+		if ($PSBoundParameters.ContainsKey("SourceEBSVolumeId") -or $PSBoundParameters.ContainsKey("OnlyRootDevice"))
+		{
+			New-DynamicParameter -Name "VolumeSize" -Type ([System.Int32]) -ValidateRange @(1, 16384) -RuntimeParameterDictionary $ParamDictionary | Out-Null
+		}
+
+		Write-Output -InputObject $ParamDictionary
+	}
+
+    Begin {
+    }
+
+    Process {
+		if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1 -and -not $PSBoundParameters.ContainsKey("Iops"))
+		{
+			throw "You must specify a number of IOPS if the destination volumes are of type Io1."			
+		}
+
+		# Map the common AWS parameters
+		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$SourceAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
+
+		if (-not $PSBoundParameters.ContainsKey("Region"))
+		{
+			$Region = [Amazon.RegionEndpoint]::GetBySystemName($SourceSplat.Region)
+		}
+		
+		# Map the common parameters, but with the destination Region
+		[System.Collections.Hashtable]$DestinationSplat = New-AWSSplat -Region $DestinationRegion -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation
+		[System.Collections.Hashtable]$DestinationAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $DestinationSplat
+
+		# If the user did not specify a destination region, use the source region
+		# which could be specified, or be the default
+		if (-not $PSBoundParameters.ContainsKey("DestinationRegion"))
+		{
+			$DestinationSplat.Region = $SourceSplat.Region
+			$DestinationAWSUtilitiesSplat.Region = $SourceAWSUtilitiesSplat.Region
+			$DestinationRegion = [Amazon.RegionEndpoint]::GetBySystemName($DestinationSplat.Region)
+		}
+
+		# The first step is to get the volume Ids attached to the instance we are trying to copy data from
+        [Amazon.EC2.Model.Volume[]]$EBSVolumes = @()
+
+        switch -Wildcard ($PSCmdlet.ParameterSetName) {
+            "*SourceByInstanceName" {
+
+				[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId -Name $SourceInstanceName @SourceAWSUtilitiesSplat
+
+				if ($Instance -ne $null)
+				{
+					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
+					{
+						$AvailabilityZone = $Instance.Placement.AvailabilityZone
+						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
+					}
+
+					if ($OnlyRootDevice)
+					{
+						$EBSVolumes = $Instance.BlockDeviceMappings | `
+                            Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | `
+                            Select-Object -First 1 -ExpandProperty Ebs | `
+                            Select-Object -ExpandProperty VolumeId	| `
+                            Get-EC2Volume @SourceSplat
+					}
+					else
+					{
+						$EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
+					}                        
+				}
+
+                break
+            }
+            "*SourceByInstanceId" {
+                
+                # This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
+                # so save the error output and don't strongly type it
+                [Amazon.EC2.Model.Instance]$Instance  = Get-EC2InstanceByNameOrId -InstanceId $SourceInstanceId @SourceAWSUtilitiesSplat
+
+                if ($Instance -ne $null)
+                {
+					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
+					{
+						$AvailabilityZone = $Instance.Placement.AvailabilityZone
+						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
+					}
+
+                    if ($OnlyRootDevice)
+                    {
+						$EBSVolumes = $Instance.BlockDeviceMappings | `
+							Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | `
+							Select-Object -ExpandProperty Ebs | `
+							Select-Object -First 1 -ExpandProperty VolumeId	| `
+							Get-EC2Volume @SourceSplat
+                    }
+                    else
+                    {
+                        $EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
+                    }                       
+                }
+
+                break
+            }
+            "*SourceByVolumeId" {
+				# This check just ensures the EC2 EBS volume exists
+
+                [Amazon.EC2.Model.Volume]$Volume = Get-EC2Volume -VolumeId $SourceEBSVolumeId @SourceSplat
+                
+                if ($Volume -ne $null)
+                {
+                    $EBSVolumes = @($Volume)
+
+				    # Only update the AZ if a specific one wasn't specified and we're not moving cross region
+					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
+				    {
+					    $AvailabilityZone = $Volume.AvailabilityZone
+						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
+				    }
+                }
+                else
+                {
+                    throw "[ERROR] Could not find a volume matching $SourceEBSVolumeId"
+                }
+
+                break
+            }
+            default {
+                throw "Could not determine parameter set name"
+            }
+        }
+
+		# Test this here so we can throw early and not go through creating snapshots before we find this out
+		# The dynamic param VolumeSize should only be added if there is 1 source volume, but
+		# but let's make sure
+		# Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
+		if ($PSBoundParameters.ContainsKey("VolumeSize") -and $EBSVolumes.Length -eq 1)
+		{
+			[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
+
+			foreach ($Vol in $EBSVolumes)
+			{
+				if ($Size -lt $Vol.Size)
+				{
+					throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($Vol.Size) GiB for $($Vol.VolumeId)."
+				}
+
+				# We don't need to check the other types since they all use the same upper limit, which was checked by the 
+				# parameter validation, and the value can't be less than the minimum since the existing volumes must comply
+				# with that minimum
+				if ($Vol.VolumeType -eq [Amazon.EC2.VolumeType]::Standard -and $Size -gt 1024)
+				{
+					throw "The specified size, $Size GiB, is greater than 1024, the maximum size for the Standard volume type."				
+				}
+			}
+		}
+
+		# Retrieve the destination EC2 instance
+		# This needs to come after the instance retrieval because it may
+		# update the destination AZ
+        [Amazon.EC2.Model.Instance]$Destination = $null
+
+        switch -Wildcard ($PSCmdlet.ParameterSetName)
+        {
+            "DestinationByName*" {
+				$Destination = Get-EC2InstanceByNameOrId -Name $DestinationInstanceName @DestinationAWSUtilitiesSplat
+				$AvailabilityZone = $Destination.Placement.AvailabilityZone
+
+                break
+            }
+            "DestinationById*" {
+                $Destination = Get-EC2InstanceByNameOrId -InstanceId $DestinationInstaceId @DestinationAWSUtilitiesSplat
+				$AvailabilityZone = $Destination.Placement.AvailabilityZone
+
+                break
+            }
+            default {
+                Write-Verbose -Message "A destination is not provided, so just creating the snapshots and volumes"
+
+				# If the AZ hasn't been specified previously because this is a cross region
+				# move, select a default one for the destination region
+                if ([System.String]::IsNullOrEmpty($AvailabilityZone))
+                {
+                    $AvailabilityZone = Get-EC2AvailabilityZone @DestinationSplat | Where-Object {$_.State -eq [Amazon.EC2.AvailabilityZoneState]::Available} | Select-Object -First 1 -ExpandProperty ZoneName
+                    Write-Verbose -Message "Using a default AZ in the destination region since a destination instance and AZ were not specified: $AvailabilityZone"
+                }
+            }
+        }
+
+		# This will be used in the snapshot description
+		[System.String]$Purpose = [System.String]::Empty
+
+		if ($Destination -ne $null)
+		{
+			$Purpose = $Destination.InstanceId
+		}
+		else
+		{
+			$Purpose = $DestinationRegion.SystemName
+		}
+
+		# Create the snapshots at the source
+
+        [Amazon.EC2.Model.Snapshot[]]$SourceSnapshots = @()
+
+        # Using a try here so the finally step will always delete the snapshots if specified
+		try
+		{
+            [System.Collections.Generic.Queue[Amazon.EC2.Model.Volume]]$EBSVolQueue = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.Volume] 
+
+            foreach ($Item in $EBSVolumes)
+            {
+                $EBSVolQueue.Enqueue($Item)
+            }
+
+            # Make sure the volume is available or in-use before attempting the snapshot
+            while ($EBSVolQueue.Count -gt 0)
+            {
+                [Amazon.EC2.Model.Volume]$Vol = $EBSVolQueue.Dequeue()
+
+                switch ($Vol.State)
+                {
+                    {$_ -in @([Amazon.EC2.VolumeState]::Available, [Amazon.EC2.VolumeState]::InUse)} {
+                    
+                        $SnapSplat = @{}
+
+                        if ($CopyTags)
+                        {
+                            [Amazon.EC2.Model.TagSpecification]$Tags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
+
+			                $Tags.ResourceType = [Amazon.EC2.ResourceType]::Snapshot
+
+			                $Tags.Tags = $Vol.Tags
+
+                            $SnapSplat.Add("TagSpecification", $Tags)
+                        }       			
+
+                        [Amazon.EC2.Model.Snapshot]$Snap = New-EC2Snapshot -VolumeId $Vol.VolumeId @SourceSplat -Description "TEMPORARY for $Purpose" @SnapSplat
+                        $SourceSnapshots += $Snap
+
+                        break
+                    }
+                    ([Amazon.EC2.VolumeState]::Creating) {
+                        Write-Verbose -Message "The volume $($Vol.VolumeId) is being created, cannot snapshot yet."
+                        $EBSVolQueue.Enqueue($Vol)
+                        break
+                    }
+                    {$_ -in @([Amazon.EC2.VolumeState]::Deleted, [Amazon.EC2.VolumeState]::Deleting, [Amazon.EC2.VolumeState]::Error)} {
+                        $DeleteSnapshots = $true
+                        throw "The volume $($Vol.VolumeId) is not in a state than can be snapshotted: $($Vol.State)."
+                        break
+                    }
+                }
+            
+                # If all of the volumes are creating, wait
+                if ($EBSVolQueue.Count -gt 0 -and ($EBSVolQueue | Where-Object { $_.State -eq  [Amazon.EC2.VolumeState]::Creating }).Count -eq $EBSVolQueue.Count)
+                {
+                    Write-Verbose -Message "All remaining volumes are in the Creating state, sleeping to allow them to finish."
+                    Start-Sleep -Seconds 15
+
+                    $Arr = $EBSVolQueue.ToArray()
+
+                    $EBSVolQueue = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.Volume]
+                
+                    for ($i = 0; $i -lt $Arr.Length; $i++)
+                    {
+                        $EBSVolQueue.Enqueue((Get-EC2Volume -VolumeId $Arr[$i].VolumeId @SourceSplat))
+                    }              
+                }
+            }
+
+			# Reset the counter for the next loop
+			$Counter = 0
+
+			# While all of the snapshots have not completed, wait
+			while (($SourceSnapshots | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
+			{
+				$Completed = (($SourceSnapshots | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $SourceSnapshots.Length) * 100
+				Write-Progress -Activity "Creating snapshots" -Status "$Completed% Complete:" -PercentComplete $Completed
+
+				# Update their statuses
+				for ($i = 0; $i -lt $SourceSnapshots.Length; $i++)
+				{
+					if ($SourceSnapshots[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
+					{
+						Write-Verbose -Message "Waiting on snapshot $($SourceSnapshots[$i].SnapshotId) to complete, currently at $($SourceSnapshots[$i].Progress) in state $($SourceSnapshots[$i].State)"
+						$SourceSnapshots[$i] = Get-EC2Snapshot -SnapshotId $SourceSnapshots[$i].SnapshotId @SourceSplat
+					}
+				}
+
+				Start-Sleep -Seconds 1
+				$Counter++
+			}
+
+			Write-Progress -Completed -Activity "Creating snapshots"
+
+			if ($Counter -ge $Timeout)
+			{
+				throw "Timeout waiting for snapshots to be created."
+			}
+			else
+			{
+				Write-Verbose -Message "All of the snapshots have completed."
+			}
+
+			[Amazon.EC2.Model.Snapshot[]]$SnapshotsToCreate = @()
+
+			# Reset the counter for the next loop
+			$Counter = 0
+
+			# If this is a cross region move, copy the snapshots over, or if we are going to encrypt the new volumes, create copies
+			if (($DestinationRegion.SystemName -ne $Region.SystemName) -or $EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))
+			{
+				Write-Verbose -Message "Copying snapshots from $($SourceSplat.Region) to $($DestinationSplat.Region) using encryption: $($EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))"
+
+				# Create the encryption splat
+				[System.Collections.Hashtable]$EncryptionSplat = @{}
+
+				if ($EncryptNewVolumes)
+				{
+					$EncryptionSplat.Add("Encrypted", $true)
+				}
+										  
+				if (-not [System.String]::IsNullOrEmpty($KmsKeyId))
+				{
+					$EncryptionSplat.Add("KmsKeyId", $KmsKeyId)
+				}
+
+				# Copy the Snapshots and get the new copied snapshot objects back
+				$SnapshotsToCreate = $SourceSnapshots | ForEach-Object {
+					[System.String]$Id = Copy-EC2Snapshot -SourceSnapshotId $_.SnapshotId -SourceRegion $SourceSplat.Region -Description "COPY OF TEMPORARY for $Purpose" @DestinationSplat @EncryptionSplat
+					[Amazon.EC2.Model.Snapshot]$Snap = Get-EC2Snapshot -SnapshotId $Id @DestinationSplat
+					
+                    # The "SnapshotsToCreate" array of objects have the original EBS volume id used to create the snapshot. This, the volume id produced by the Copy-EC2Snapshot
+                    # API action is arbitrary, so we assign the original here to ensure it is carried over
+                    $Snap.VolumeId = $_.VolumeId
+
+					if ($CopyTags)
+					{
+                        
+						New-EC2Tag -Resource $Id -Tag $_.Tags @DestinationSplat
+					}
+
+					Write-Output -InputObject $Snap
+				}
+
+				# While all of the snapshots have not completed, wait
+				while (($SnapshotsToCreate | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
+				{
+					$Completed = (($SnapshotsToCreate | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $SnapshotsToCreate.Length) * 100
+					Write-Progress -Activity "Creating snapshot copies" -Status "$Completed% Complete:" -PercentComplete $Completed
+
+					# Update their statuses
+					for ($i = 0; $i -lt $SnapshotsToCreate.Length; $i++)
+					{
+						if ($SnapshotsToCreate[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
+						{
+							# This will ensure we have a VolumeId later that we can check on
+							# to compare the copied snapshot with the original volume, since we assigned it originally
+                            # above, it will be overwritten on the next Get-EC2Snapshot API call, so re-assign it in
+                            # order to keep track of it locally in the cmdlet
+							$TempVolId = $SnapshotsToCreate[$i].VolumeId
+							Write-Verbose -Message "Waiting on snapshot $($SnapshotsToCreate[$i].SnapshotId) copy to complete, currently at $($SnapshotsToCreate[$i].Progress) in state $($SnapshotsToCreate[$i].State)"
+							$SnapshotsToCreate[$i] = Get-EC2Snapshot -SnapshotId $SnapshotsToCreate[$i].SnapshotId @DestinationSplat
+							$SnapshotsToCreate[$i].VolumeId = $TempVolId
+						}
+					}
+
+					Start-Sleep -Seconds 1
+					$Counter++
+				}
+
+				Write-Progress -Completed -Activity "Creating snapshots"
+
+				if ($Counter -ge $Timeout)
+				{
+					throw "Timeout waiting for snapshots to be copied to new region."
+				}
+				else
+				{
+					Write-Verbose -Message "All of the copied snapshots have completed."
+				}
+			}
+			else
+			{
+				# Not a cross region move and/or not encrypting the new , so assign the current snapshots to the variable
+				# that we will evaluate to create the volumes from
+
+				$SourceSnapshots.CopyTo($SnapshotsToCreate, 0)
+
+				# Empty the original array to be able to identify what needs
+				# to be deleted later, otherwise the finally block will try to delete the 
+				# same snapshots twice
+				$SourceSnapshots = @()
+			}
+
+			# Create the new volumes from the newly created snapshots
+			# The destination splat will either have the new region if it was specified or will be the same as the source region
+			# The AZ was determined from the source instance if the source and destination region were the same, otherwise
+			# the AZ was selected from the Destination instance, if one was provided, if it wasn't, then a default AZ for the new region
+			# was selected
+			[Amazon.EC2.Model.Volume[]]$NewVolumes = $SnapshotsToCreate | ForEach-Object {
+				[System.Collections.Hashtable]$NewVolumeSplat = @{}
+
+				# Make sure we use the right volume type for the destination
+				if ($PSBoundParameters.ContainsKey("VolumeType"))
+				{
+					$NewVolumeSplat.Add("VolumeType", $VolumeType)
+
+					if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
+					{
+						# Make sure the maximum of 50 IOPS to GiB isn't exceeded
+						if ($Iops -le ($_.VolumeSize * 50))
+						{
+							$NewVolumeSplat.Add("Iops", $Iops)
+						}
+						else
+						{
+							Write-Warning -Message "The desired IOPS for the snapshot from $($_.VolumeId) exceed the maximum ratio of 50 IOPS / GiB. This has been throttled to $([System.Math]::Floor($_.VolumeSize) * 50)"
+							$NewVolumeSplat.Add("Iops", [System.Math]::Floor($_.VolumeSize) * 50)
+						}
+					}
+				}
+				else
+				{
+					Write-Verbose -Message "Retrieving source volume attributes for volume $($_.VolumeId)."
+					[Amazon.EC2.Model.Volume]$SourceVolume = $EBSVolumes | Where-Object {$_.VolumeId -eq $_.VolumeId} | Select-Object -First 1
+					$NewVolumeSplat.Add("VolumeType", $SourceVolume.VolumeType)
+
+					if ($SourceVolume.VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
+					{
+						$NewVolumeSplat.Add("Iops", $SourceVolume.Iops)
+					}
+				}
+
+				# The dynamic param VolumeSize should only be added if there is 1 source, but
+				# but let's make sure. We also validated earlier than if there was 1 source and this
+				# parameter was specified, that it wasn't smaller than the current volume size
+				if ($PSBoundParameters.ContainsKey("VolumeSize") -and $SnapshotsToCreate.Length -eq 1)
+				{
+					[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
+
+					# This check is probably unnecessary here since we checked earlier, but can't hurt
+					if ($Size -ge $_.VolumeSize)
+					{
+						$NewVolumeSplat.Add("Size", $Size)
+					}
+					else
+					{
+						throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($_.VolumeSize) GiB."
+					}
+				}
+
+                if ($CopyTags)
+                {
+                    [Amazon.EC2.Model.TagSpecification]$Tags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
+
+			        $Tags.ResourceType = [Amazon.EC2.ResourceType]::Volume
+
+			        $Tags.Tags = $_.Tags
+
+                    $NewVolumeSplat.Add("TagSpecification", $Tags)
+                } 
+
+				[Amazon.EC2.Model.Volume]$NewVol = New-EC2Volume -SnapshotId $_.SnapshotId -AvailabilityZone $AvailabilityZone @DestinationSplat @NewVolumeSplat 
+
+				Write-Output -InputObject $NewVol
+			}
+
+			# Reset the counter for the next loop
+			$Counter = 0
+
+			# Wait for the new volumes to become available before we try to attach them
+			while (($NewVolumes | Where-Object {$_.State -ne [Amazon.EC2.VolumeState]::Available}) -ne $null -and $Counter -lt $Timeout)
+			{
+				$Completed = (($NewVolumes | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Length / $NewVolumes.Length) * 100
+				Write-Progress -Activity "Creating volumes" -Status "$Completed% Complete:" -PercentComplete $Completed
+			
+				for ($i = 0; $i -lt $NewVolumes.Length; $i++)
+				{
+					if ($NewVolumes[$i].State -ne [Amazon.EC2.VolumeState]::Available)
+					{
+						Write-Verbose -Message "Waiting on volume $($NewVolumes[$i].VolumeId) to become available, currently $($NewVolumes[$i].State)"
+						$NewVolumes[$i] = Get-EC2Volume -VolumeId $NewVolumes[$i].VolumeId @DestinationSplat
+					}
+				}
+
+				Start-Sleep -Seconds 1
+				$Counter++
+			}
+
+			Write-Progress -Completed -Activity "Creating volumes"
+
+			if ($Counter -ge $Timeout)
+			{
+				throw "Timeout waiting for volumes to be created."
+			}
+			else
+			{
+				Write-Verbose -Message "All of the new volumes are available."
+			}
+
+			# Check if a destination instance was specified
+			if ($Destination -ne $null)
+			{
+				Write-Verbose -Message "Mounting volumes."
+				Mount-EBSVolumes -VolumeIds ($NewVolumes | Select-Object -ExpandProperty VolumeId) -NextAvailableDevice -Instance $Destination @DestinationAWSUtilitiesSplat
+			}
+			elseif ($PSCmdlet.ParameterSetName -like ("DestinationBy*"))
+			{
+				# This means a destination instance was specified, but we didn't
+				# find it in the Get-EC2Instance cmdlet
+				Write-Warning -Message "[ERROR] Could not find the destination instance"
+			}
+
+            Write-Output -InputObject $NewVolumes					
+		}
+		finally
+		{		
+			if ($DeleteSnapshots)
+			{
+				# Delete the original source Region snapshots if there are any
+				if ($SourceSnapshots -ne $null -and $SourceSnapshots.Length -gt 0)
+				{
+					Write-Verbose -Message "Deleting snapshots $([System.String]::Join(",", ($SourceSnapshots | Select-Object -ExpandProperty SnapshotId)))"
+					$SourceSnapshots | Remove-EC2Snapshot @SourceSplat -Confirm:$false
+				}
+
+                # Delete the snapshots used to create the new volumes, there should always be something to delete here
+                # unless the cmdlet threw an exception
+				if ($SnapshotsToCreate -ne $null -and $SnapshotsToCreate.Length -gt 0)
+				{
+					Write-Verbose -Message "Deleting snapshots $([System.String]::Join(",", ($SnapshotsToCreate | Select-Object -ExpandProperty SnapshotId)))"
+					$SnapshotsToCreate | Remove-EC2Snapshot @DestinationSplat -Confirm:$false
+				}
+			}
+		}
+    }
+
+    End {
+    }
+}
+
+Function Mount-EBSVolumes {
+	<#
+		.SYNOPSIS
+			Mounts a set of available EBS volumes to an instance.
+
+		.DESCRIPTION
+			The cmdlet can mount one to many available EBS volumes to an EC2 instance. The destination instance
+			can be provided as an EC2 object or by instance id. The mount point device can be specified directly
+			or the next available device is used. If the device is specified directly and is in use, or if multiple
+			volumes are specified, the provided device is used as a starting point to find the next available device.
+
+		.PARAMETER VolumeIds
+			The Ids of the volumes to attach. The must be in an available status.
+
+		.PARAMETER NextAvailableDevice
+			Specifies that the cmdlet will find the next available device between xvdf and xvdp.
+
+		.PARAMETER Device
+			Specify the device that the volume will be attached at. If multiple volumes are specified, this is the starting
+			point to find the next available device for each.
+
+		.PARAMETER InstanceId
+			The id of the instance to attach the volumes to.
+
+		.PARAMETER Instance
+			The Amazon.EC2.Model.Instance object to attach the volumes to.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Mount-EBSVolumes -VolumeIds vol-04d16ab9a1b07449g -InstanceId i-057bd4fe22eced7bb -Region ([Amazon.RegionEndpoint]::USWest1)
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			None
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/23/2019
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
+		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
+		[ValidateNotNullOrEmpty()]
+		[System.String[]]$VolumeIds,
+
+		[Parameter(ParameterSetName = "InputObjectAndNextAvailable", Mandatory = $true)]
+		[Parameter(ParameterSetName = "IdAndNextAvailable", Mandatory = $true)]
+		[Switch]$NextAvailableDevice,
+
+		[Parameter(ParameterSetName = "InputObjectAndDevice", Mandatory = $true)]
+		[Parameter(ParameterSetName = "IdAndDevice", Mandatory = $true)]
+		[ValidateSet("xvdf", "xvdg", "xvdh", "xvdi", "xvdj",
+			"xvdk", "xvdl", "xvdm", "xvdn", "xvdo", "xvdp",
+			"/dev/sdf", "/dev/sdg", "/dev/sdh", "/dev/sdi", "/dev/sdj",
+			"/dev/sdk", "/dev/sdl", "/dev/sdm", "/dev/sdn", "/dev/sdo", "/dev/sdp")]
+		[System.String]$Device,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndDevice")]
+		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceId,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndDevice")]
+		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
+		[Amazon.EC2.Model.Instance]$Instance,
+
+		[Parameter()]
+		[ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileName = [System.String]::Empty,
+
+        [Parameter()]
+		[ValidateNotNull()]
+        [System.String]$AccessKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SecretKey = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$SessionToken = [System.String]::Empty,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.Runtime.AWSCredentials]$Credential,
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [System.String]$ProfileLocation = [System.String]::Empty
+	)		
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		if ($PSCmdlet.ParameterSetName.StartsWith("Id"))
+		{
+			$Instance = Get-EC2Instance -InstanceId $InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
+		}
+
+		if ($Instance.Platform -ieq "windows")
+		{
+			[System.String]$DeviceBase = "xvd"
+		}
+		else
+		{
+			[System.String]$DeviceBase = "/dev/sd"
+		}
+
+		[System.Int32]$CurrentLetter = 0
+
+		if ($NextAvailableDevice)
+		{
+			# https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/device_naming.html
+			# https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/device_naming.html
+			# Both docs start recommended device naming at "f" for EBS volumes
+			$CurrentLetter = [System.Int32][System.Char]'f'
+		}
+		else
+		{
+			$CurrentLetter = [System.Int32][System.Char]$Device.Substring($Device.Length - 1)
+		}
+
+		# Iterate all of the new volumes and attach them
+		foreach ($Item in $VolumeIds)
+		{
+			try
+			{
+				# Update the instance object so we get updated block device mappings
+				$Instance = Get-EC2Instance -InstanceId $Instance.InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
+				[System.String[]]$Devices = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty DeviceName
+
+				# Try to find an available device
+				while ($Devices.Contains($DeviceBase + [System.Char]$CurrentLetter) -and [System.Char]$CurrentLetter -ne 'q')
+				{
+					$CurrentLetter++
+				}
+
+				# The last usable letter is p, so if we get to q, there aren't any available device mounts left
+				if ([System.Char]$CurrentLetter -ne 'q')
+				{
+					Write-Verbose -Message "Attaching $Item to $($Instance.InstanceId) at device $DeviceBase$([System.Char]$CurrentLetter)"
+                        
+					# The cmdlet will create the volume as the same size as the snapshot
+					[Amazon.EC2.Model.VolumeAttachment]$Attachment = Add-EC2Volume -InstanceId $Instance.InstanceId -VolumeId $Item -Device ($DeviceBase + [System.String][System.Char]$CurrentLetter) @Splat
+					Write-Verbose -Message "Attached at $($Attachment.AttachTime)"
+                    
+					# Increment the letter so the next check doesn't try to use the same device
+					$CurrentLetter++
+				}
+				else
+				{
+					# Break out of the iteration because we can't mount any more drives
+					Write-Warning -Message "No available devices left to mount the device"
+					break
+				}
+			}
+			catch [Exception]
+			{
+				Write-Warning -Message "[ERROR] Could not attach volume $($Item.VolumeId) with error $($_.Exception.Message)"
+			}
 		}
 	}
 
@@ -4477,266 +5743,6 @@ Function Get-AWSCloudTrailLogs {
     }
 }
 
-Function Move-EC2Instance {
-	<#
-		.SYNOPSIS
-			Moves an EC2 instance from a source region to a different target region.
-
-		.DESCRIPTION
-			This cmdlet moves 1 or more EC2 instances from a source region to a different target region by creating a new AMI of the source in the
-			target region. The user will then need to manually deploy the EC2 instance into the desired VPC from the AMI. The cmdlet will also optionally
-			cleanup the source region region by deleting the source EC2 instance(s) and source AMI(s).
-
-			Each specified instance will be stopped before having an AMI created from it to ensure consistency of all EBS volumes.
-
-		.PARAMETER InstanceIds
-			The source EC2 instances to move.
-
-		.PARAMETER DestinationRegion
-			The region the new AMIs will be created in.
-
-		.PARAMETER Encrypt
-			Specifies that the destination AMIs will use encrypted EBS volumes.
-
-		.PARAMETER Cleanup
-			If specified, the source EC2 instances and source AMIs that are created will all be deleted once the destination AMIs have been successfully created.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked and that the source EC2 instances are in. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			$AMIs = Move-EC2Instance -InstanceIds @("i-033b1455fc5c3b386") -DestinationRegion ([Amazon.RegionEndpoint]::UsEast1) -Region ([Amazon.RegionEndpoint]::UsEast2) -CleanupSource -ProfileName "mylab"
-		
-			This example moves the instance i-033b1455fc5c3b386 to us-east-1 from us-east-2 and deletes the source instance and its intermediate AMI. The resulting AMI id is returned to the pipeline.
-
-		.INPUTS
-			System.String[]
-
-		.OUTPUTS
-			System.String[]
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 12/12/2017
-
-	#>
-	[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "HIGH")]
-	[OutputType([System.String[]])]
-	Param(
-		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-		[System.String[]]$InstanceIds,
-
-		[Parameter(Mandatory = $true)]
-		[Amazon.RegionEndpoint]$DestinationRegion,
-
-		[Parameter()]
-		[Switch]$Encrypt = $false,
-
-		[Parameter()]
-		[Switch]$CleanupSource,
-
-		[Parameter()]
-		[Switch]$Force,
-
-		[Parameter()]
-        [ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileName = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$AccessKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SecretKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SessionToken = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.Runtime.AWSCredentials]$Credential = $null,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-	Begin {
-
-	}
-
-	Process {
-		Initialize-AWSDefaults
-
-        if ($Region -eq $null) {
-            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
-        }
-
-        [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		[System.Collections.Hashtable]$DestinationSplat = New-AWSSplat -Region $DestinationRegion -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		[System.Collections.Hashtable]$UtilSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
-
-		$ConfirmMessage = "Are you sure you want to stop and copy $($InstanceIds.Length) EC2 instance$(if ($Instances.Length -gt 1){"s"}) from $Region to $DestinationRegion`?"
-
-		$WhatIfDescription = "Stopped and moved $($InstanceIds.Length) EC2 instance$(if ($Instances.Length -gt 1){"s"}) from $Region to $DestinationRegion."
-		$ConfirmCaption = "Move Instances"
-
-		if ($Force -or $PSCmdlet.ShouldProcess($WhatIfDescription, $ConfirmMessage, $ConfirmCaption))
-		{
-			[System.Collections.Hashtable]$Tracking = @{}
-
-			# Create a collection
-			$WaitingOn = {@()}.Invoke()
-
-			foreach ($Id in $InstanceIds)
-			{
-				Write-Verbose -Message "Stopping instance $Id."
-				Set-EC2InstanceState -InstanceId $Id -State STOP -Force @UtilSplat
-				$WaitingOn.Add($Id)
-				$Tracking.Add($Id, @{})
-			}
-
-			[System.Collections.Hashtable]$NewAmis = @{}
-
-			while ($WaitingOn.Length -gt 0)
-			{
-				Write-Verbose -Message "Waiting for all instances to stop."
-				Start-Sleep -Seconds 10
-
-				[System.String[]]$Temp = $WaitingOn
-			
-				foreach ($Item in $Temp)
-				{
-					[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId -InstanceId $Item @UtilSplat
-
-					if ($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Stopped)
-					{
-						try
-						{
-							Write-Verbose -Message "Creating new AMI for $($Instance.InstanceId)."
-							$Desc = Get-EC2Image -ImageId $Instance.ImageId @SourceSplat | Select-Object -ExpandProperty Name
-
-							$Name = $Instance.InstanceId
-
-							if (($Instance.Tags | Where-Object {$_.Key -ieq "Name"}).Length -gt 0)
-							{
-								$Name = $Instance.Tags | Where-Object {$_.Key -ieq "Name"} | Select-Object -First 1 -ExpandProperty Value
-							}
-
-							$ImageId = New-EC2Image -InstanceId $Instance.InstanceId -Name $Name -Description $Desc @SourceSplat
-							Write-Verbose -Message "New AMI is $ImageId."
-							$NewAmis.Add($ImageId, @{"Name" = $Name; "Description" = $Desc; "InstanceId" = $Instance.InstanceId})
-						}
-						catch [Exception] 
-						{
-							Write-Warning -Message "Could not create a new image for $($Instance.InstanceId):`r`n$(ConvertTo-Json -InputObject $_.Exception)"
-						}
-						finally 
-						{
-							$WaitingOn.Remove($Item) | Out-Null
-						}
-					}
-				}
-			}
-		
-			[System.Collections.Hashtable]$FinalAmis = @{}
-
-			while ($NewAmis.Count -gt 0)
-			{
-				Write-Verbose -Message "Waiting for all source AMIs to be created."
-				Start-Sleep -Seconds 10
-
-				[System.Collections.Hashtable]$Temp = $NewAmis.Clone()
-
-				foreach ($Ami in $Temp.GetEnumerator())
-				{
-					[Amazon.EC2.Model.Image]$Image = Get-EC2Image -ImageId $Ami.Key @SourceSplat
-
-					if ($Image.State -eq [Amazon.EC2.ImageState]::Available)
-					{
-						try {
-							Write-Verbose -Message "Copying AMI $($Ami.Key) to $DestinationRegion from $Region."
-							[System.Boolean]$Encrypted = $Encrypt
-							$NewAmiId = Copy-EC2Image -SourceImageId $Ami.Key -Description $Ami.Value.Description -Name $Ami.Value.Name -Encrypted $Encrypted -SourceRegion $Region.SystemName @DestinationSplat
-							$FinalAmis.Add($NewAmiId, $Ami.Value.Name)
-							Write-Verbose -Message "Successfully initiated copy operation."
-
-							if ($CleanupSource)
-							{
-								Write-Verbose -Message "Cleaning up source for $($Ami.InstanceId)."
-								Set-EC2InstanceState -InstanceId $Ami.InstanceId -State TERMINATE -Force @UtilSplat
-								Unregister-EC2Image -ImageId $Ami.Key @SourceSplat 
-							}
-						}
-						catch [Exception]
-						{
-							Write-Warning -Message "Could not copy the AMI $($Ami.Key):`r`n$($_.Exception.Message)"
-						}
-						finally
-						{
-							$NewAmis.Remove($Ami.Key)
-						}
-					}
-				}
-			}
-
-			if ($CleanupSource)
-			{
-				Write-Verbose -Message "Deleting source EC2 instances."
-				foreach ($Id in $InstancesToDelete)
-				{
-					Write-Verbose -Message "Deleting instance $Id."
-					Set-EC2InstanceState -InstanceId $Id -State TERMINATE -Force @SourceSplat
-				}
-
-				Write-Verbose -Message "Deleting source AMIs."
-
-				foreach ($Id in $NewAmiIds)
-				{
-					Write-Verbose -Message "Deleting AMI $Id."
-					Unregister-EC2Image -ImageId $Id @SourceSplat
-				}
-			}
-
-			Write-Output -InputObject $FinalAmis
-		}
-	}
-
-	End {
-
-	}
-}
-
 Function Invoke-AWSTemporaryLogin {
 	<#
 		.SYNOPSIS
@@ -6375,879 +7381,3 @@ catch [Exception] {
 		}
 	}
 
-
-Function Copy-EBSVolume {
-    <#
-        .SYNOPSIS
-			Copies EBS volumes from a source to a destination.
-
-		.DESCRIPTION
-			This cmdlet creates EBS Volume snaphshots of a specified EBS volume, or volumes attached to an instance and then creates new EBS volumes
-			from those snapshots.
-
-			If a destination EC2 instance is not specified either by Id or name, the volumes are created in the destination region, but are not
-			attached to anything and the cmdlet will return details about the volumes.
-
-			The volumes are attached to the first available device on the EC2 instance starting at xvdf and will attach until xvdp.
-
-		.PARAMETER SourceInstanceId
-			The Id of the source EC2 instance to copy EBS volumes from.
-
-		.PARAMETER SourceEBSVolumeId
-			The Id of the source EBS volume to copy.
-
-		.PARAMETER SourceInstanceName
-			The name of the source EC2 instance to copy EBS volumes from. This matches against the Name tag value.
-
-		.PARAMETER DestinationInstanceId
-			The Id of the EC2 instance to attach the new volumes to.
-
-		.PARAMETER DestinationInstanceName
-			The name of the destination EC2 instance to attach the new volumes to. This matches against the Name tag value.
-
-		.PARAMETER OnlyRootDevice
-			Only copies the root/boot volume from the source EC2 instance.
-
-		.PARAMETER DeleteSnapshots
-			The intermediary snapshots will be deleted. If this is not specified, they will be left.
-
-		.PARAMETER DestinationRegion
-			The region the new volumes should be created in. This must be specified if the destination instance
-			is in a different region. This parameter defaults to the source region.
-
-		.PARAMETER AvailabilityZone
-			The AZ in which the new volume(s) should be created. If this is not specified, the AZ is determined by the AZ the source volume
-			is in if the new volume is being created in the same region. If the volume is being created in a different region, the AZ of 
-			the indicated destination EC2 instance is used. If a destination EC2 instance isn't specified, then the first available AZ of the
-			region will be used.
-
-		.PARAMETER Timeout
-			The amount of time in seconds to wait for each snapshot and volume to be created. This defaults to 900 seconds (15 minutes).
-
-		.PARAMETER KmsKeyId
-			If you specify this, the resulting EBS volumes will be encrypted using this KMS key. You don't need to specify the EncryptNewVolumes parameter if you provide this one.
-
-		.PARAMETER EncryptNewVolumes
-			This will encrypt the resulting volumes using the default AWS KMS key.	
-
-		.PARAMETER VolumeType
-			You can specify a single volume type for all newly created volumes. If this parameter is not specified, the source volume attributes are used to create the new volume, including the number of provisioned IOPS.
-
-		.PARAMETER Iops
-			Only valid for Provisioned IOPS SSD volumes when you specify Io1 for the VolumeType parameter. The number of I/O operations per second (IOPS) to provision for the volume, with a maximum ratio of 50 IOPS/GiB. Constraint: Range is 100 to 20000 for Provisioned IOPS SSD volumes.
-
-		.PARAMETER VolumeSize
-			If the source is an EBS Volume Id, or the OnlyRootDevice parameter is specified, a new Volume size can be specified for the resulting volume in GiBs. The size must be greater than or equal to the source.
-
-			Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
-
-		.PARAMETER CopyTags 
-			Specify this to copy the current tag values from the source volume(s) to the destination volume(s) and intermediate EBS snapshots.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DeleteSnapshots -ProfileName mycredprofile -Verbose -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
-			
-			Copies the EBS volumes from server1 in the region specified in the mycredprofile AWS credential profile as the default region to us-east-2. 
-
-		.EXAMPLE
-			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DestinationInstanceName server2 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
-			
-			Copies the EBS volume(s) from server1 in us-west-2 and attaches them to server2 in us-east-2. 
-
-		.EXAMPLE
-			[Amazon.EC2.Model.Volume[]]$NewVolumes = Copy-EBSVolume -SourceInstanceName server1 -DeleteSnapshots -ProfileName mycredprofile -Verbose -Region ([Amazon.RegionEndpoint]::USWest2) -DestinationRegion ([Amazon.RegionEndpoint]::USEast2)
-			
-			Copies the EBS volume(s) from server1 in us-west-2 to us-east-2. The new volumes are unattached.
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			Amazon.EC2.Model.Volume[]
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 1/14/2019
-    #>
-    [CmdletBinding()]
-    Param(
-		[Parameter(ParameterSetName = "SourceByInstanceId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceId", Mandatory = $true)]
-        [System.String]$SourceInstanceId,
-
-		[Parameter(ParameterSetName = "SourceByVolumeId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByVolumeId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByVolumeId", Mandatory = $true)]
-        [System.String]$SourceEBSVolumeId,
-
-		[Parameter(ParameterSetName = "SourceByInstanceName", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceName", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceName", Mandatory = $true)]
-        [System.String]$SourceInstanceName,
-
-        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByVolumeId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByIdSourceByInstanceName", Mandatory = $true)]
-        [System.String]$DestinationInstaceId,
-
-        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByVolumeId", Mandatory = $true)]
-        [Parameter(ParameterSetName = "DestinationByNameSourceByInstanceName", Mandatory = $true)]
-        [System.String]$DestinationInstanceName,
-
-        [Parameter()]
-        [Switch]$OnlyRootDevice,
-
-        [Parameter()]
-        [switch]$DeleteSnapshots,
-
-        [Parameter()]
-		[ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileName = [System.String]::Empty,
-
-        [Parameter()]
-		[ValidateNotNull()]
-        [System.String]$AccessKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SecretKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SessionToken = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [Amazon.Runtime.AWSCredentials]$Credential,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileLocation = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$AvailabilityZone = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.RegionEndpoint]$DestinationRegion,
-
-		[Parameter()]
-		[System.UInt32]$Timeout = 900,
-
-		[Parameter()]
-		[Switch]$EncryptNewVolumes,
-
-		[Parameter()]
-		[Amazon.EC2.VolumeType]$VolumeType,
-
-		[Parameter()]
-		[ValidateRange(100, 20000)]
-		[System.Int32]$Iops,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$KmsKeyId = [System.String]::Empty,
-
-		[Parameter()]
-		[Switch]$CopyTags
-    )
-
-	DynamicParam 
-	{
-		[System.Management.Automation.RuntimeDefinedParameterDictionary]$ParamDictionary = New-Object -TypeName System.Management.Automation.RuntimeDefinedParameterDictionary
-
-		# If we're only targetting a single EBS volume, we can specify a new size
-		if ($PSBoundParameters.ContainsKey("SourceEBSVolumeId") -or $PSBoundParameters.ContainsKey("OnlyRootDevice"))
-		{
-			New-DynamicParameter -Name "VolumeSize" -Type ([System.Int32]) -ValidateRange @(1, 16384) -RuntimeParameterDictionary $ParamDictionary | Out-Null
-		}
-
-		Write-Output -InputObject $ParamDictionary
-	}
-
-    Begin {
-    }
-
-    Process {
-		if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1 -and -not $PSBoundParameters.ContainsKey("Iops"))
-		{
-			throw "You must specify a number of IOPS if the destination volumes are of type Io1."			
-		}
-
-		# Map the common AWS parameters
-		[System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		[System.Collections.Hashtable]$SourceAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $SourceSplat
-
-		if (-not $PSBoundParameters.ContainsKey("Region"))
-		{
-			$Region = [Amazon.RegionEndpoint]::GetBySystemName($SourceSplat.Region)
-		}
-		
-		# Map the common parameters, but with the destination Region
-		[System.Collections.Hashtable]$DestinationSplat = New-AWSSplat -Region $DestinationRegion -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation
-		[System.Collections.Hashtable]$DestinationAWSUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $DestinationSplat
-
-		# If the user did not specify a destination region, use the source region
-		# which could be specified, or be the default
-		if (-not $PSBoundParameters.ContainsKey("DestinationRegion"))
-		{
-			$DestinationSplat.Region = $SourceSplat.Region
-			$DestinationAWSUtilitiesSplat.Region = $SourceAWSUtilitiesSplat.Region
-			$DestinationRegion = [Amazon.RegionEndpoint]::GetBySystemName($DestinationSplat.Region)
-		}
-
-		# The first step is to get the volume Ids attached to the instance we are trying to copy data from
-        [Amazon.EC2.Model.Volume[]]$EBSVolumes = @()
-
-        switch -Wildcard ($PSCmdlet.ParameterSetName) {
-            "*SourceByInstanceName" {
-
-				[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId -Name $SourceInstanceName @SourceAWSUtilitiesSplat
-
-				if ($Instance -ne $null)
-				{
-					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
-					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
-					{
-						$AvailabilityZone = $Instance.Placement.AvailabilityZone
-						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
-					}
-
-					if ($OnlyRootDevice)
-					{
-						$EBSVolumes = $Instance.BlockDeviceMappings | Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | Select-Object -First 1 -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId	| Get-EC2Volume @SourceSplat
-					}
-					else
-					{
-						$EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
-					}                        
-				}
-
-                break
-            }
-            "*SourceByInstanceId" {
-                
-                # This is actually a [Amazon.EC2.Model.Reservation], but if no instance is returned, it comes back as System.Object[]
-                # so save the error output and don't strongly type it
-                [Amazon.EC2.Model.Instance]$Instance  = Get-EC2InstanceByNameOrId -InstanceId $SourceInstanceId @SourceAWSUtilitiesSplat
-
-                if ($Instance -ne $null)
-                {
-					# Only update the AZ if a specific one wasn't specified and we're not moving cross region
-					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
-					{
-						$AvailabilityZone = $Instance.Placement.AvailabilityZone
-						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
-					}
-
-                    if ($OnlyRootDevice)
-                    {
-						$EBSVolumes = $Instance.BlockDeviceMappings | `
-							Where-Object {$_.DeviceName -eq $Instance.RootDeviceName} | `
-							Select-Object -ExpandProperty Ebs | `
-							Select-Object -First 1 -ExpandProperty VolumeId	| `
-							Get-EC2Volume @SourceSplat
-                    }
-                    else
-                    {
-                        $EBSVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId | Get-EC2Volume @SourceSplat
-                    }                       
-                }
-
-                break
-            }
-            "*SourceByVolumeId" {
-				# This check just ensures the EC2 EBS volume exists
-
-                [Amazon.EC2.Model.Volume]$Volume = Get-EC2Volume -VolumeId $SourceEBSVolumeId @SourceSplat
-                
-                if ($Volume -ne $null)
-                {
-                    $EBSVolumes = @($Volume)
-
-				    # Only update the AZ if a specific one wasn't specified and we're not moving cross region
-					if (-not $PSBoundParameters.ContainsKey("AvailabilityZone") -and $Region.SystemName -eq $DestinationRegion.SystemName)
-				    {
-					    $AvailabilityZone = $Volume.AvailabilityZone
-						Write-Verbose -Message "An AZ wasn't explicitly specified, so we'll use the AZ of the source volume: $AvailabilityZone"
-				    }
-                }
-                else
-                {
-                    throw "[ERROR] Could not find a volume matching $SourceEBSVolumeId"
-                }
-
-                break
-            }
-            default {
-                throw "Could not determine parameter set name"
-            }
-        }
-
-		# Test this here so we can throw early and not go through creating snapshots before we find this out
-		# The dynamic param VolumeSize should only be added if there is 1 source volume, but
-		# but let's make sure
-		# Constraints: 1-16384 for gp2, 4-16384 for io1, 500-16384 for st1, 500-16384 for sc1, and 1-1024 for standard.
-		if ($PSBoundParameters.ContainsKey("VolumeSize") -and $EBSVolumes.Length -eq 1)
-		{
-			[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
-
-			foreach ($Vol in $EBSVolumes)
-			{
-				if ($Size -lt $Vol.Size)
-				{
-					throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($Vol.Size) GiB for $($Vol.VolumeId)."
-				}
-
-				# We don't need to check the other types since they all use the same upper limit, which was checked by the 
-				# parameter validation, and the value can't be less than the minimum since the existing volumes must comply
-				# with that minimum
-				if ($Vol.VolumeType -eq [Amazon.EC2.VolumeType]::Standard -and $Size -gt 1024)
-				{
-					throw "The specified size, $Size GiB, is greater than 1024, the maximum size for the Standard volume type."				
-				}
-			}
-		}
-
-		# Retrieve the destination EC2 instance
-		# This needs to come after the instance retrieval because it may
-		# update the destination AZ
-        [Amazon.EC2.Model.Instance]$Destination = $null
-
-        switch -Wildcard ($PSCmdlet.ParameterSetName)
-        {
-            "DestinationByName*" {
-				$Destination = Get-EC2InstanceByNameOrId -Name $DestinationInstanceName @DestinationAWSUtilitiesSplat
-				$AvailabilityZone = $Destination.Placement.AvailabilityZone
-
-                break
-            }
-            "DestinationById*" {
-                $Destination = Get-EC2InstanceByNameOrId -InstanceId $DestinationInstaceId @DestinationAWSUtilitiesSplat
-				$AvailabilityZone = $Destination.Placement.AvailabilityZone
-
-                break
-            }
-            default {
-                Write-Verbose -Message "A destination is not provided, so just creating the snapshots and volumes"
-
-				# If the AZ hasn't been specified previously because this is a cross region
-				# move, select a default one for the destination region
-                if ([System.String]::IsNullOrEmpty($AvailabilityZone))
-                {
-                    $AvailabilityZone = Get-EC2AvailabilityZone -Region $DestinationRegion.SystemName | Where-Object {$_.State -eq [Amazon.EC2.AvailabilityZoneState]::Available} | Select-Object -First 1 -ExpandProperty ZoneName
-                    Write-Verbose -Message "Using a default AZ in the destination region since a destination instance and AZ were not specified: $AvailabilityZone"
-                }
-            }
-        }
-
-		# This will be used in the snapshot description
-		[System.String]$Purpose = [System.String]::Empty
-
-		if ($Destination -ne $null)
-		{
-			$Purpose = $Destination.InstanceId
-		}
-		else
-		{
-			$Purpose = $DestinationRegion.SystemName
-		}
-
-		# Create the snapshots at the source
-
-        [Amazon.EC2.Model.Snapshot[]]$Snapshots = $EBSVolumes | ForEach-Object {
-			[Amazon.EC2.Model.Snapshot]$Snap = New-EC2Snapshot -VolumeId $_.VolumeId @SourceSplat -Description "TEMPORARY for $Purpose"
-
-			if ($CopyTags)
-			{
-				New-EC2Tag -Resource $Snap.SnapshotId -Tag $_.Tags @SourceSplat
-			}
-
-			Write-Output -InputObject $Snap
-		}
-
-		# Using a try here so the finally step will always delete the snapshots if specified
-		try
-		{
-			# Reset the counter for the next loop
-			$Counter = 0
-
-			# While all of the snapshots have not completed, wait
-			while (($Snapshots | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
-			{
-				$Completed = (($Snapshots | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $Snapshots.Length) * 100
-				Write-Progress -Activity "Creating snapshots" -Status "$Completed% Complete:" -PercentComplete $Completed
-
-				# Update their statuses
-				for ($i = 0; $i -lt $Snapshots.Length; $i++)
-				{
-					if ($Snapshots[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
-					{
-						Write-Verbose -Message "Waiting on snapshot $($Snapshots[$i].SnapshotId) to complete, currently at $($Snapshots[$i].Progress) in state $($Snapshots[$i].State)"
-						$Snapshots[$i] = Get-EC2Snapshot -SnapshotId $Snapshots[$i].SnapshotId @SourceSplat
-					}
-				}
-
-				Start-Sleep -Seconds 1
-				$Counter++
-			}
-
-			Write-Progress -Completed -Activity "Creating snapshots"
-
-			if ($Counter -ge $Timeout)
-			{
-				throw "Timeout waiting for snapshots to be created."
-			}
-			else
-			{
-				Write-Verbose -Message "All of the snapshots have completed."
-			}
-
-			[Amazon.EC2.Model.Snapshot[]]$SnapshotsToCreate = @()
-
-			# Reset the counter for the next loop
-			$Counter = 0
-
-			# If this is a cross region move, copy the snapshots over, or if we are going to encrypt the new volumes, create copies
-			if (($DestinationRegion.SystemName -ne $Region.SystemName) -or $EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))
-			{
-				Write-Verbose -Message "Copying snapshots from $($SourceSplat.Region) to $($DestinationSplat.Region) using encryption: $($EncryptNewVolumes -or -not [System.String]::IsNullOrEmpty($KmsKeyId))"
-
-				# Create the encryption splat
-				[System.Collections.Hashtable]$EncryptionSplat = @{}
-
-				if ($EncryptNewVolumes)
-				{
-					$EncryptionSplat.Add("Encrypted", $true)
-				}
-										  
-				if (-not [System.String]::IsNullOrEmpty($KmsKeyId))
-				{
-					$EncryptionSplat.Add("KmsKeyId", $KmsKeyId)
-				}
-
-				# Copy the Snapshots and get the new copied snapshot objects back
-				$SnapshotsToCreate = $Snapshots | ForEach-Object {
-					[System.String]$Id = Copy-EC2Snapshot -SourceSnapshotId $_.SnapshotId -SourceRegion $SourceSplat.Region -Description "COPY OF TEMPORARY for $Purpose" @DestinationSplat @EncryptionSplat
-					[Amazon.EC2.Model.Snapshot]$Snap = Get-EC2Snapshot -SnapshotId $Id @DestinationSplat
-					$Snap.VolumeId = $_.VolumeId
-
-					if ($CopyTags)
-					{
-						New-EC2Tag -Resource $Id -Tag ($EBSVolumes | Where-Object {$_.VolumeId -eq $Snap.VolumeId } | Select-Object -First 1 -ExpandProperty Tags) @DestinationSplat
-					}
-
-					Write-Output -InputObject $Snap
-				}
-
-				# While all of the snapshots have not completed, wait
-				while (($SnapshotsToCreate | Where-Object {$_.State -ne [Amazon.EC2.SnapshotState]::Completed}) -ne $null -and $Counter -lt $Timeout)
-				{
-					$Completed = (($SnapshotsToCreate | Where-Object {$_.State -eq [Amazon.EC2.SnapshotState]::Completed}).Length / $SnapshotsToCreate.Length) * 100
-					Write-Progress -Activity "Creating snapshot copies" -Status "$Completed% Complete:" -PercentComplete $Completed
-
-					# Update their statuses
-					for ($i = 0; $i -lt $SnapshotsToCreate.Length; $i++)
-					{
-						if ($SnapshotsToCreate[$i].State -ne [Amazon.EC2.SnapshotState]::Completed)
-						{
-							# This will ensure we have a VolumeId later that we can check on
-							# to compare the copied snapshot with the original volume
-							$TempVolId = $SnapshotsToCreate[$i].VolumeId
-							Write-Verbose -Message "Waiting on snapshot $($SnapshotsToCreate[$i].SnapshotId) copy to complete, currently at $($SnapshotsToCreate[$i].Progress) in state $($SnapshotsToCreate[$i].State)"
-							$SnapshotsToCreate[$i] = Get-EC2Snapshot -SnapshotId $SnapshotsToCreate[$i].SnapshotId @DestinationSplat
-							$SnapshotsToCreate[$i].VolumeId = $TempVolId
-						}
-					}
-
-					Start-Sleep -Seconds 1
-					$Counter++
-				}
-
-				Write-Progress -Completed -Activity "Creating snapshots"
-
-				if ($Counter -ge $Timeout)
-				{
-					throw "Timeout waiting for snapshots to be copied to new region."
-				}
-				else
-				{
-					Write-Verbose -Message "All of the copied snapshots have completed."
-				}
-			}
-			else
-			{
-				# Not a cross region move, so assign the current snapshots to the variable
-				# that we will evaluate to create the volumes from
-
-				$SnapshotsToCreate = $Snapshots
-
-				# Empty the original array to be able to identify what needs
-				# to be deleted later, otherwise the finally block will try to delete the 
-				# same snapshots twice
-				$Snapshots = @()
-			}
-
-			# Create the new volumes from the newly created snapshots
-			# The destination splat will either have the new region if it was specified or will be the same as the source region
-			# The AZ was determined from the source instance if the source and destination region were the same, otherwise
-			# the AZ was selected from the Destination instance, if one was provided, if it wasn't, then a default AZ for the new region
-			# was selected
-			[Amazon.EC2.Model.Volume[]]$NewVolumes = $SnapshotsToCreate | ForEach-Object {
-				[System.Collections.Hashtable]$NewVolumeSplat = @{}
-
-				# Make sure we use the right volume type for the destination
-				if ($PSBoundParameters.ContainsKey("VolumeType"))
-				{
-					$NewVolumeSplat.Add("VolumeType", $VolumeType)
-
-					if ($VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
-					{
-						# Make sure the maximum of 50 IOPS to GiB isn't exceeded
-						if ($Iops -le ($_.VolumeSize * 50))
-						{
-							$NewVolumeSplat.Add("Iops", $Iops)
-						}
-						else
-						{
-							Write-Warning -Message "The desired IOPS for the snapshot from $($_.VolumeId) exceed the maximum ratio of 50 IOPS / GiB. This has been throttled to $([System.Math]::Floor($_.VolumeSize) * 50)"
-							$NewVolumeSplat.Add("Iops", [System.Math]::Floor($_.VolumeSize) * 50)
-						}
-					}
-				}
-				else
-				{
-					Write-Verbose -Message "Retrieving source volume attributes for volume $($_.VolumeId)."
-					[Amazon.EC2.Model.Volume]$SourceVolume = $EBSVolumes | Where-Object {$_.VolumeId -eq $_.VolumeId} | Select-Object -First 1
-					$NewVolumeSplat.Add("VolumeType", $SourceVolume.VolumeType)
-
-					if ($SourceVolume.VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
-					{
-						$NewVolumeSplat.Add("Iops", $SourceVolume.Iops)
-					}
-				}
-
-				# The dynamic param VolumeSize should only be added if there is 1 source, but
-				# but let's make sure. We also validated earlier than if there was 1 source and this
-				# parameter was specified, that it wasn't smaller than the current volume size
-				if ($PSBoundParameters.ContainsKey("VolumeSize") -and $SnapshotsToCreate.Length -eq 1)
-				{
-					[System.Int32]$Size = $PSBoundParameters["VolumeSize"]
-
-					# This check is probably unnecessary here since we checked earlier, but can't hurt
-					if ($Size -ge $_.VolumeSize)
-					{
-						$NewVolumeSplat.Add("Size", $Size)
-					}
-					else
-					{
-						throw "The specified new volume size, $Size GiB, is not greater than or equal to the current volume size of $($_.VolumeSize) GiB."
-					}
-				}
-
-				[Amazon.EC2.Model.Volume]$NewVol = New-EC2Volume -SnapshotId $_.SnapshotId -AvailabilityZone $AvailabilityZone @DestinationSplat @NewVolumeSplat
-
-				if ($CopyTags)
-				{
-					[Amazon.EC2.Model.TagDescription[]]$Tags = Get-EC2Tag -Filter @{Name="resource-id"; Value=$NewVol.VolumeId} @DestinationSplat
-					New-EC2Tag -Resource $NewVol.VolumeId -Tag $Tags @DestinationSplat
-				}
-
-				Write-Output -InputObject $NewVol
-			}
-
-			# Reset the counter for the next loop
-			$Counter = 0
-
-			# Wait for the new volumes to become available before we try to attach them
-			while (($NewVolumes | Where-Object {$_.State -ne [Amazon.EC2.VolumeState]::Available}) -ne $null -and $Counter -lt $Timeout)
-			{
-				$Completed = (($NewVolumes | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Length / $NewVolumes.Length) * 100
-				Write-Progress -Activity "Creating volumes" -Status "$Completed% Complete:" -PercentComplete $Completed
-			
-				for ($i = 0; $i -lt $NewVolumes.Length; $i++)
-				{
-					if ($NewVolumes[$i].State -ne [Amazon.EC2.VolumeState]::Available)
-					{
-						Write-Verbose -Message "Waiting on volume $($NewVolumes[$i].VolumeId) to become available, currently $($NewVolumes[$i].State)"
-						$NewVolumes[$i] = Get-EC2Volume -VolumeId $NewVolumes[$i].VolumeId @DestinationSplat
-					}
-				}
-
-				Start-Sleep -Seconds 1
-				$Counter++
-			}
-
-			Write-Progress -Completed -Activity "Creating volumes"
-
-			if ($Counter -ge $Timeout)
-			{
-				throw "Timeout waiting for volumes to be created."
-			}
-			else
-			{
-				Write-Verbose -Message "All of the new volumes are available."
-			}
-
-			# Check if a destination instance was specified
-			if ($Destination -ne $null)
-			{
-				Write-Verbose -Message "Mounting volumes."
-				Mount-EBSVolumes -VolumeIds ($NewVolumes | Select-Object -ExpandProperty VolumeId) -NextAvailableDevice -Instance $Destination @DestinationAWSUtilitiesSplat
-			}
-			elseif ($PSCmdlet.ParameterSetName -like ("DestinationBy*"))
-			{
-				# This means a destination instance was specified, but we didn't
-				# find it in the Get-EC2Instance cmdlet
-				Write-Warning -Message "[ERROR] Could not find the destination instance"
-			}
-
-            Write-Output -InputObject $NewVolumes					
-		}
-		finally
-		{		
-			if ($DeleteSnapshots)
-			{
-				# Delete the original source Region snapshots if there are any
-				if ($Snapshots -ne $null -and $Snapshots.Length -gt 0)
-				{
-					Write-Verbose -Message "Deleting snapshots $([System.String]::Join(",", ($Snapshots | Select-Object -ExpandProperty SnapshotId)))"
-					$Snapshots | Remove-EC2Snapshot @SourceSplat -Confirm:$false
-				}
-
-				if ($SnapshotsToCreate -ne $null -and $SnapshotsToCreate.Length -gt 0)
-				{
-					Write-Verbose -Message "Deleting snapshots $([System.String]::Join(",", ($SnapshotsToCreate | Select-Object -ExpandProperty SnapshotId)))"
-					$SnapshotsToCreate | Remove-EC2Snapshot @DestinationSplat -Confirm:$false
-				}
-			}
-		}
-    }
-
-    End {
-    }
-}
-
-Function Mount-EBSVolumes {
-	<#
-		.SYNOPSIS
-			Mounts a set of available EBS volumes to an instance.
-
-		.DESCRIPTION
-			The cmdlet can mount one to many available EBS volumes to an EC2 instance. The destination instance
-			can be provided as an EC2 object or by instance id. The mount point device can be specified directly
-			or the next available device is used. If the device is specified directly and is in use, or if multiple
-			volumes are specified, the provided device is used as a starting point to find the next available device.
-
-		.PARAMETER VolumeIds
-			The Ids of the volumes to attach. The must be in an available status.
-
-		.PARAMETER NextAvailableDevice
-			Specifies that the cmdlet will find the next available device between xvdf and xvdp.
-
-		.PARAMETER Device
-			Specify the device that the volume will be attached at. If multiple volumes are specified, this is the starting
-			point to find the next available device for each.
-
-		.PARAMETER InstanceId
-			The id of the instance to attach the volumes to.
-
-		.PARAMETER Instance
-			The Amazon.EC2.Model.Instance object to attach the volumes to.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			Mount-EBSVolumes -VolumeIds vol-04d16ab9a1b07449g -InstanceId i-057bd4fe22eced7bb -Region ([Amazon.RegionEndpoint]::USWest1)
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			None
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 6/5/2017
-	#>
-	[CmdletBinding()]
-	Param(
-		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
-		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
-		[ValidateNotNull()]
-		[System.String[]]$VolumeIds,
-
-		[Parameter(ParameterSetName = "InputObjectAndNextAvailable", Mandatory = $true)]
-		[Parameter(ParameterSetName = "IdAndNextAvailable", Mandatory = $true)]
-		[switch]$NextAvailableDevice,
-
-		[Parameter(ParameterSetName = "InputObjectAndDevice", Mandatory = $true)]
-		[Parameter(ParameterSetName = "IdAndDevice", Mandatory = $true)]
-		[ValidateSet("xvdf", "xvdg", "xvdh", "xvdi", "xvdj",
-			"xvdk", "xvdl", "xvdm", "xvdn", "xvdo", "xvdp")]
-		[System.String]$Device,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "IdAndDevice")]
-		[Parameter(Mandatory = $true, ParameterSetName = "IdAndNextAvailable")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$InstanceId,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndDevice")]
-		[Parameter(Mandatory = $true, ParameterSetName = "InputObjectAndNextAvailable")]
-		[Amazon.EC2.Model.Instance]$Instance,
-
-		[Parameter()]
-		[ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileName = [System.String]::Empty,
-
-        [Parameter()]
-		[ValidateNotNull()]
-        [System.String]$AccessKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SecretKey = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$SessionToken = [System.String]::Empty,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [Amazon.Runtime.AWSCredentials]$Credential,
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [System.String]$ProfileLocation = [System.String]::Empty
-	)		
-
-	Begin {
-	}
-
-	Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-
-		if ($PSCmdlet.ParameterSetName.StartsWith("Id"))
-		{
-			$Destination = Get-EC2Instance -InstanceId $InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
-		}
-
-		[System.String]$DeviceBase = "xvd"
-		[System.Int32]$CurrentLetter = 0
-
-		if ($NextAvailableDevice)
-		{
-			#If you map an EBS volume with the name xvda, Windows does not recognize the volume.
-			$CurrentLetter = [System.Int32][System.Char]'f'
-		}
-		else
-		{
-			$CurrentLetter = [System.Int32][System.Char]$Device.Substring($Device.Length - 1)
-		}
-
-		#Iterate all of the new volumes and attach them
-		foreach ($Item in $VolumeIds)
-		{
-			try
-			{
-				$Destination = Get-EC2Instance -InstanceId $Destination.InstanceId @Splat | Select-Object -ExpandProperty Instances | Select-Object -First 1
-				[System.String[]]$Devices = $Destination.BlockDeviceMappings | Select-Object -ExpandProperty DeviceName
-
-				#Try to find an available device
-				while ($Devices.Contains($DeviceBase + [System.Char]$CurrentLetter) -and [System.Char]$CurrentLetter -ne 'q')
-				{
-					$CurrentLetter++
-				}
-
-				#The last usable letter is p
-				if ([System.Char]$CurrentLetter -ne 'q')
-				{
-					Write-Verbose -Message "Attaching $Item to $($Destination.InstanceId) at device $DeviceBase$([System.Char]$CurrentLetter)"
-                        
-					#The cmdlet will create the volume as the same size as the snapshot
-					[Amazon.EC2.Model.VolumeAttachment]$Attachment = Add-EC2Volume -InstanceId $Destination.InstanceId -VolumeId $Item -Device ($DeviceBase + [System.String][System.Char]$CurrentLetter) @Splat
-					Write-Verbose -Message "Attached at $($Attachment.AttachTime)"
-                    
-					#Increment the letter so the next check doesn't try to use the same device
-					$CurrentLetter++
-				}
-				else
-				{
-					#Break out of the iteration because we can't mount any more drives
-					Write-Warning -Message "No available devices left to mount the device"
-					break
-				}
-			}
-			catch [Exception]
-			{
-				Write-Warning -Message "[ERROR] Could not attach volume $($Item.VolumeId) with error $($_.Exception.Message)"
-			}
-		}
-	}
-
-	End {
-	}
-}
