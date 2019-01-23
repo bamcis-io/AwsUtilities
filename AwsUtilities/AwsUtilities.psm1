@@ -928,7 +928,7 @@ Function Get-EC2CurrentImageIds {
 Function Move-EC2Instance {
 	<#
 		.SYNOPSIS
-			Moves an EC2 instance from a source region to a different target region as an AMI.
+			Moves an EC2 instance from a source region to a different target region.
 
 		.DESCRIPTION
 			This cmdlet moves 1 or more EC2 instances from a source region to a different target region by creating a new AMI of the source in the
@@ -938,7 +938,7 @@ Function Move-EC2Instance {
 			Each specified instance will be stopped before having an AMI created from it to ensure consistency of all EBS volumes.
 
 		.PARAMETER InstanceIds
-			The source EC2 instance(s) to move.
+			The source EC2 instances to move.
 
 		.PARAMETER DestinationRegion
 			The region the new AMIs will be created in.
@@ -996,9 +996,10 @@ Function Move-EC2Instance {
 		.NOTES
 			AUTHOR: Michael Haken
 			LAST UPDATE: 1/23/2019
+
 	#>
 	[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "HIGH")]
-	[OutputType([Amazon.EC2.Model.Image[]])]
+	[OutputType([System.String[]])]
 	Param(
 		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
 		[System.String[]]$InstanceIds,
@@ -1191,16 +1192,26 @@ Function Move-EC2Instance {
                 }
 			}
 
-            while (($FinalAMIs | Where-Object {$_.ImageState -eq [Amazon.EC2.ImageState]::Available}).Count -ne $FinalAMIs.Count)
+            if ($Wait)
             {
-                Write-Verbose -Message "Waiting for final AMIs to finish creation"
-                Start-Sleep -Seconds 10
-
-                for ($i = 0; $i -lt $FinalAMIs.Count; $i++)
+                while (($FinalAMIs | Where-Object {$_.ImageState -eq [Amazon.EC2.ImageState]::Available}).Count -ne $FinalAMIs.Count)
                 {
-                    if ($FinalAMIs[$i].ImageState -ne [Amazon.EC2.ImageState]::Available)
+                    Write-Verbose -Message "Waiting for final AMIs to finish creation"
+                    Start-Sleep -Seconds 10
+
+                    for ($i = 0; $i -lt $FinalAMIs.Count; $i++)
                     {
-                        $FinalAMIs[$i] = Get-EC2Image -ImageId $FinalAMIs[$i].ImageId @DestinationSplat
+                        if ($FinalAMIs[$i].ImageState -ne [Amazon.EC2.ImageState]::Available)
+                        {
+                            $FinalAMIs[$i] = Get-EC2Image -ImageId $FinalAMIs[$i].ImageId @DestinationSplat
+                        }
+                    }
+
+                    $BadAMIs = $FinalAMIs | Where-Object {$_.ImageState -in @([Amazon.EC2.ImageState]::Deregistered, [Amazon.EC2.ImageState]::Error, [Amazon.EC2.ImageState]::Failed, [Amazon.EC2.ImageState]::Invalid)}
+
+                    if ($BadAMIs -ne $null -and $BadAMIs.Count -gt 0)
+                    {
+                        throw "There was an error creating new AMIs for the following Ids: $([System.String]::Join(",", ($BadAMIs | Select-Object -ExpandProperty ImageId)))"
                     }
                 }
             }
@@ -1231,6 +1242,7 @@ Function Move-EC2Instance {
 	End {
 	}
 }
+
 
 #endregion
 
@@ -4160,8 +4172,6 @@ Function Get-AWSVPCEndpointsByLocation {
 #endregion
 
 
-
-
 Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 	<#
 		.SYNOPSIS
@@ -6672,9 +6682,6 @@ Function Get-AWSVpcPeeringSummary {
 }
 
 
-
-
-
 Function Update-EC2InstanceAmiId {
 	<#
 		.SYNOPSIS
@@ -7380,4 +7387,3 @@ catch [Exception] {
 		End {
 		}
 	}
-
