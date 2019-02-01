@@ -1,5 +1,4 @@
-Import-Module -Name AWSPowerShell -ErrorAction Stop
-Initialize-AWSDefaults
+Import-Module -Name AWSPowerShell -ErrorAction Stop -Verbose:$false
 
 $script:CREATED_BY = "CreatedBy"
 $script:CAN_BE_DELETED = "CanBeDeleted"
@@ -514,7 +513,7 @@ Function Set-EC2InstanceState {
 			The amount of time in seconds to wait for the EC2 to reach the desired state if the Wait parameter is specified. This defaults to 600.
 
 		.PARAMETER Wait
-			Specify to wait for the EC2 instance to reach the desired state.
+			Specify to wait for the EC2 instance to reach the desired state. Also specify this parameter to wait for in instance in 'Pending' to reach 'Running' to change state to 'Stopped'.
 
 		.PARAMETER PassThru
 			Returns back the InstanceStateChange result or InstanceId if RESTART is specified.
@@ -561,7 +560,7 @@ Function Set-EC2InstanceState {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 6/30/2017
+			LAST UPDATE: 1/27/2019
 	#>
 	[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "HIGH")]
 	Param(
@@ -652,13 +651,50 @@ Function Set-EC2InstanceState {
 			switch ($State)
 			{
 				"STOP" {
-					if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopped -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopping -and $Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::ShuttingDown)
+					# Stop can only be called when the instance has reached the running state
+					switch ($Instance.State.Name)
 					{
-						$Result = Stop-EC2Instance -InstanceId $Instance.InstanceId @Splat
-					}
-					else
-					{
-						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+						([Amazon.EC2.InstanceStateName]::Pending) 
+						{
+							if ($Wait)
+							{
+								while ($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Pending)
+								{
+									Start-Sleep -Seconds 5
+									$Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+								}
+
+								if ($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Running)
+								{
+									$Result = Stop-EC2Instance -InstanceId $Instance.InstanceId @Splat
+								}
+								else
+								{
+									throw "The instance did not enter a running state after pending and could not be stopped directly. The current state is $($Instance.State.Name)."
+								}
+							}
+							else
+							{
+								throw "The instance has not reached the 'running' state and cannot be stopped. Specify 'Wait' to wait for the instance to enter the running state from pending."
+							}
+
+							break
+						}
+						([Amazon.EC2.InstanceStateName]::Running) {
+							$Result = Stop-EC2Instance -InstanceId $Instance.InstanceId @Splat
+							break
+						}
+						{ $_ -in @([Amazon.EC2.InstanceStateName]::Stopping, [Amazon.EC2.InstanceStateName]::ShuttingDown, [Amazon.EC2.InstanceStateName]::Stopped) } {
+							Write-Verbose -Message "Instance is already in or entering the desired state."
+							break
+						}
+						([Amazon.EC2.InstanceStateName]::Terminated) {
+							throw "The specified instance $($Instance.InstanceId) has been terminated and cannot be stopped."
+							break
+						}
+						default {
+							throw "Unknown state $($Instance.State.Name) for instance $($Instance.InstanceId)."
+						}
 					}
 
 					$DesiredState = [Amazon.EC2.InstanceStateName]::Stopped
@@ -672,7 +708,7 @@ Function Set-EC2InstanceState {
 					}
 					else
 					{
-						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+						Write-Verbose -Message "Instance $($Instance.InstanceId) already in state: $($Instance.State.Name)."
 					}
 
 					$DesiredState = [Amazon.EC2.InstanceStateName]::Running
@@ -693,7 +729,7 @@ Function Set-EC2InstanceState {
 					}
 					else
 					{
-						Write-Verbose -Message "Instance $($Instance.InstanceId) already $($Instance.State.Name)."
+						Write-Verbose -Message "Instance $($Instance.InstanceId) already in state: $($Instance.State.Name)."
 					}
 
 					$DesiredState = [Amazon.EC2.InstanceStateName]::Terminated
@@ -707,22 +743,34 @@ Function Set-EC2InstanceState {
 
 			if ($Wait -and $State -ne "RESTART")
 			{
-				Write-Host -Object "Waiting for EC2 instance $($Instance.InstanceId) to $State..."
+				$CursorStartPosition = $Host.UI.RawUI.CursorPosition
+				$CursorStartPosition.Y += 1
+				$Scroll = "/-\|"
 
 				[System.Int32]$Increment = 5
-				[System.Int32]$Counter = 0
+				[System.Diagnostics.Stopwatch]$SW = [System.Diagnostics.Stopwatch]::StartNew()
+				$Counter = 0
 
-				while ($Instance.State.Name -ne $DesiredState -and $Counter -lt $Timeout)
+				while ($Instance.State.Name -ne $DesiredState -and $SW.Elapsed.TotalSeconds -le $Timeout)
 				{
-					Write-Verbose -Message "Waiting for $($Instance.InstanceId) to $State."
+					$Host.UI.RawUI.CursorPosition = $CursorStartPosition
+					$Text = "`rWaiting for $($Instance.InstanceId) to $State $($Scroll[$Counter++])"
+
+					if ($Counter -eq $Scroll.Length)
+					{
+						$Counter = 0
+					}
+
+					Write-Host $Text -NoNewline
 
 					Start-Sleep -Seconds $Increment
-					$Counter += $Increment
 
 					$Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
 				}
 
-				if ($Counter -ge $Timeout)
+				$Host.UI.RawUI.CursorPosition = $CursorStartPosition
+
+				if ($SW.Elapsed.TotalSeconds -ge $Timeout)
 				{
 					throw "Timeout waiting for instance to $State."
 				}
@@ -1243,6 +1291,1734 @@ Function Move-EC2Instance {
 	}
 }
 
+Function Copy-EC2InstanceLaunchParameters {
+    <#
+        .SYNOPSIS
+            Evaluates the characteristics of a currently running EC2 instance and creates a hashtable that can be used as a Splat for the New-EC2Instance cmdlet to create a clone of the source instance.
+
+        .DESCRIPTION
+            Evaluates the characteristics of a currently running EC2 instance and creates a hashtable that can be used as a Splat for the New-EC2Instance cmdlet to create a clone of the source instance. Because a number of things are duplicated, like IP addresses, you would need to terminate the source instance before using this to launch another instance.
+
+            The image id is only included when you specify the parameter because the image Ids regularly change as the AMIs are updated.
+
+            EIPs are not included as part of the launch data.
+
+			Source/Destination Checking is not included as part of the Network Interface configuration, it cannot be set in a InstanceNetworkInterfaceSpecification object.
+
+			The tag specification aggregates the tags for attached volumes and network interfaces. The resulting tag specification includes all tag keys
+
+            The following attributes are included:
+                - Affinity
+                - PlacementGroup
+                - HostId
+				- Tenancy
+				- AvailabilityZone
+				- BlockDeviceMappings
+                - CpuCredit
+                - CpuOption
+                - DisableApiTermination
+                - EbsOptimized
+                - ElasticGpuSpecification
+	            - ImageId
+                - InstanceInitiatedShutdownBehavior
+				- InstanceMarketOption
+                - InstanceProfile_Arn
+				- InstanceType
+                - KernelId
+				- KeyName
+                - Monitoring_Enabled
+                - RamdiskId
+                - TagSpecification
+                - UserData
+                - InstanceMarketOption
+                - NetworkInterface
+
+        .PARAMETER Instance
+            The instance to get details about. The cmdlet may retrieve additional attributes about the specified instance.
+
+        .PARAMETER IncludeImageId
+            Includes the image id as part of the results.
+
+		.PARAMETER MatchVolumeTagKey
+			If this is specified, only Volume tags keys that are common (case-sensitive) across all volumes are included in the tag specification. The first tag value will be used as the value for all volume tags with that key.
+
+		.PARAMETER MatchVolumeTagKeyAndValue
+			When this is specified, only Volume tags where both the key and value (case-sensitive) match for all attached volumes are included in the tag specification. The setting overrides the MatchVolumeTagKey parameter.
+
+		.PARAMETER MatchInterfaceTagKey
+			If this is specified, only Interface tags keys that are common (case-sensitive) across all interfaces are included in the tag specification. The first tag value will be used as the value for all interface tags with that key.
+
+		.PARAMETER MatchInterfaceTagKeyAndValue
+			When this is specified, only Interface tags where both the key and value (case-sensitive) match for all attached interfaces are included in the tag specification. The setting overrides the MatchInterfaceTagKey parameter.
+
+		.PARAMETER NoVolumeTags
+			When specified, no volume tags are copied.
+
+		.PARAMETER OnlyRootVolumeTags
+			When specified, only the root volume tags are included in the tag specification.
+
+		.PARAMETER NoInterfaceTags
+			When specified, no interface tags are copied.
+
+		.PARAMETER OnlyRootInterfaceTags
+			When specified, only the root interface (eth0) tags are included in the tag specification.
+
+        .PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$Params = Copy-EC2InstanceLaunchParameters -Instance (Get-EC2Instance i-123456789012)
+
+			Gets the parameters of the specified instance that can be used to launch a "clone" of that instance.
+
+		.INPUTS
+			Amazon.EC2.Model.Instance
+
+		.OUTPUTS
+			System.Collections.Hashtable
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/27/2019
+    #>    
+    [CmdletBinding()]
+    [OutputType([System.Collections.Hashtable])]
+    Param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0, ParameterSetName = "Instance")]
+        [ValidateNotNull()]
+        [Amazon.EC2.Model.Instance]$Instance,
+
+		[Parameter(Mandatory = $true, Position = 0, ParameterSetName ="InstanceId")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceId,
+
+        [Parameter()]
+        [Switch]$IncludeImageId,
+
+		[Parameter()]
+		[Switch]$MatchVolumeTagKey,
+
+		[Parameter()]
+		[Switch]$MatchVolumeTagKeyAndValue,
+
+		[Parameter()]
+		[Switch]$MatchInterfaceTagKey,
+
+		[Parameter()]
+		[Switch]$MatchInterfaceTagKeyAndValue,
+
+		[Parameter()]
+		[Switch]$NoVolumeTags,
+
+		[Parameter()]
+		[Switch]$OnlyRootVolumeTags,
+
+		[Parameter()]
+		[Switch]$NoInterfaceTags,
+
+		[Parameter()]
+		[Switch]$OnlyRootInterfaceTags,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+    )
+
+    Begin {
+    }
+
+    Process {
+        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+
+		if ($PSCmdlet.ParameterSetName -eq "InstanceId")
+		{
+			$Instance = Get-EC2InstanceByNameOrId -InstanceId $InstanceId @AwsUtilitiesSplat
+
+			if ($Instance -eq $null)
+			{
+				throw "Could not find an instance with id $InstanceId. Make sure you have specified the correct region and credentials."
+			}
+		}
+
+        # Build the optional parameters for New-EC2Instance
+		[System.Collections.Hashtable]$NewInstanceSplat = @{}
+
+		# Copy placement info for affinity, placement group, and host id
+		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.Affinity))
+		{
+			$NewInstanceSplat.Add("Affinity", $Instance.Placement.Affinity)
+		}
+
+		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.GroupName))
+		{
+			$NewInstanceSplat.Add("PlacementGroup", $Instance.Placement.GroupName)
+		}
+
+		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.HostId))
+		{
+			$NewInstanceSplat.Add("HostId", $Instance.Placement.HostId)
+		}
+
+		# Tenancy
+		$NewInstanceSplat.Add("Tenancy", $Instance.Placement.Tenancy)
+
+		# AZ
+		$NewInstanceSplat.Add("AvailabilityZone", $Instance.Placement.AvailabilityZone)
+
+        # This checks for the cpu credit specification for T3 instances
+        if ($Instance.InstanceType.Value -ilike "t2*" -or $Instance.InstanceType.Value -ilike "t3*")
+        {
+            [Amazon.EC2.Model.InstanceCreditSpecification]$CreditSpec = Get-EC2CreditSpecification -InstanceId $Instance.InstanceId @Splat
+
+            $NewInstanceSplat.Add("CpuCredit", $CreditSpec.CpuCredits)
+        }
+
+        # This checks to see if a specific CPU configuration was specified
+        if ($Instance.CpuOptions -ne $null -and $Instance.InstanceType.Value -inotlike "t2*" -and $Instance.InstanceType.Value -inotlike "t3*")
+        {
+            [Amazon.EC2.Model.CpuOptionsRequest]$CpuOptionsRequest = New-Object -TypeName Amazon.EC2.Model.CpuOptionsRequest
+            $CpuOptionsRequest.CoreCount = $Instance.CpuOptions.CoreCount
+            $CpuOptionsRequest.ThreadsPerCore = $Instance.CpuOptions.ThreadsPerCore
+
+            $NewInstanceSplat.Add("CpuOption", $CpuOptionsRequest)
+        }
+
+        # Checks for Disabling API Termination
+        [Amazon.EC2.Model.InstanceAttribute]$DisableApiTerminationAttr = Get-EC2InstanceAttribute -InstanceId $Instance.InstanceId -Attribute disableApiTermination @Splat
+
+        if ($DisableApiTerminationAttr.DisableApiTermination -eq $true)
+        {
+            $NewInstanceSplat.Add("DisableApiTermination", $true)
+        }
+
+        # Checks for EBS optimization
+		if ($Instance.EbsOptimized -eq $true)
+		{
+			$NewInstanceSplat.Add("EbsOptimized", $true)
+		}
+
+        # Elastic GPUs
+        if ($Instance.ElasticGpuAssociations -ne $null -and $Instance.ElasticGpuAssociations.Count -gt 0)
+        {
+            [Amazon.EC2.Model.ElasticGpuSpecification[]]$Specifications = @()
+
+            foreach ($Association in $Instance.ElasticGpuAssociations)
+            {
+                [Amazon.EC2.Model.ElasticGpuAssociation]$Association = ""
+                [Amazon.EC2.Model.ElasticGpuSpecification]$Spec = New-Object -TypeName Amazon.EC2.Model.ElasticGpuSpecification
+                [Amazon.EC2.Model.ElasticGpus]$Gpu = Get-EC2ElasticGpu -ElasticGpuId $Association.ElasticGpuId @Splat
+                $Spec.Type = $Gpu.ElasticGpuType
+                $Specifications += $Spec
+            }
+
+            $NewInstanceSplat.Add("ElasticGpuSpecification", $Specifications)
+        }
+
+        # If specified, include the image id
+        if ($IncludeImageId)
+        {
+            $NewInstanceSplat.Add("ImageId", $Instance.ImageId)
+        }
+
+        # Checks for shutdown behavior, can be "", stop, or terminate
+        [Amazon.EC2.Model.InstanceAttribute]$ShutdownBehaviorAttr = Get-EC2InstanceAttribute -InstanceId $Instance.InstanceId -Attribute instanceInitiatedShutdownBehavior @Splat
+
+        if (-not [System.String]::IsNullOrEmpty($ShutdownBehaviorAttr.InstanceInitiatedShutdownBehavior))
+        {
+            $NewInstanceSplat.Add("InstanceInitiatedShutdownBehavior", $ShutdownBehaviorAttr.InstanceInitiatedShutdownBehavior)
+        }
+
+        # Specifies the same IAM instance profile, if present
+        if ($Instance.IamInstanceProfile -ne $null -and -not [System.String]::IsNullOrEmpty($Instance.IamInstanceProfile.Arn))
+        {
+            $NewInstanceSplat.Add("InstanceProfile_Arn", $Instance.IamInstanceProfile.Arn)
+        }
+
+		$NewInstanceSplat.Add("InstanceType", $Instance.InstanceType)
+
+        # Checks KernelId
+        if (-not [System.String]::IsNullOrEmpty($Instance.KernelId))
+        {
+            $NewInstanceSplat.Add("KernelId", $Instance.KernelId)
+        }
+
+		# Get KeyName
+		if (-not [System.String]::IsNullOrEmpty($Instance.KeyName))
+		{
+			$NewInstanceSplat.Add("KeyName", $Instance.KeyName)
+		}
+
+        # This specifies if detailed monitoring is enabled
+		if ($Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Enabled -or $Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Pending)
+		{
+			$NewInstanceSplat.Add("Monitoring_Enabled", $true)
+		}
+
+        # Checks for the Ram disk id
+        if (-not [System.String]::IsNullOrEmpty($Instance.RamdiskId))
+        {
+            $NewInstanceSplat.Add("RamdiskId", $Instance.RamdiskId)
+        }
+
+        # Check for presence of userdata
+        [Amazon.EC2.Model.InstanceAttribute]$UserDataAttr = Get-EC2InstanceAttribute -InstanceId $Instance.InstanceId -Attribute userData @Splat
+
+        if (-not [System.String]::IsNullOrEmpty($UserDataAttr.UserData))
+        {
+            $NewInstanceSplat.Add("UserData", $UserDataAttr.UserData)
+        }
+
+        # Use this to help determine how to request the instance
+        if ($Instance.InstanceLifecycle -ne $null -and -not [System.String]::IsNullOrEmpty($Instance.InstanceLifecycle.Value))
+		{
+			switch ($Instance.InstanceLifecycle) {
+                ([Amazon.EC2.InstanceLifecycleType]::Scheduled) {
+                    # Probably do nothing since the launch template would need to be updated, not the actual instance
+                    Write-Warning -Message "This is a scheduled instance, you should update the launch template instead of the instance."
+                    break
+                }
+                ([Amazon.EC2.InstanceLifecycleType]::Spot) {
+                    [Amazon.EC2.Model.InstanceMarketOptionsRequest]$MarketRequest = New-Object -TypeName Amazon.EC2.Model.InstanceMarketOptionsRequest
+                    $MarketRequest.MarketType = [Amazon.EC2.MarketType]::Spot
+                    $MarketRequest.SpotOptions = New-Object -TypeName Amazon.EC2.Model.SpotMarketOptions
+
+					[Amazon.EC2.Model.SpotInstanceRequest]$SpotRequest = Get-EC2SpotInstanceRequest -SpotInstanceRequestId $Instance.SpotInstanceRequestId @Splat
+
+					if ($SpotRequest.BlockDurationMinutes -gt 0)
+					{
+						$MarketRequest.SpotOptions.BlockDurationMinutes = $SpotRequest.BlockDurationMinutes
+					}
+
+					$MarketRequest.SpotOptions.InstanceInterruptionBehavior = $SpotRequest.InstanceInterruptionBehavior
+					$MarketRequest.SpotOptions.MaxPrice = $SpotRequest.SpotPrice
+					$MarketRequest.SpotOptions.SpotInstanceType = $SpotRequest.Type
+
+					if ($SpotRequest.ValidUntil -gt [System.DateTime]::MinValue)
+					{
+						$MarketRequest.SpotOptions.ValidUntilUtc = $SpotRequest.ValidUntil.ToUniversalTime()
+					}
+
+                    $NewInstanceSplat.Add("InstanceMarketOption", $MarketRequest)
+
+                    break
+                }
+                default {
+                    # Do nothing
+                    break
+                }
+            }
+		} 
+
+		##### Do all network interface stuff here
+
+		[Amazon.EC2.Model.InstanceNetworkInterfaceSpecification[]]$NetworkInterfaceSpecifications = @()
+
+		# Track interfaces for use later in tagging
+		[Amazon.EC2.Model.NetworkInterface[]]$Interfaces = @()
+
+		foreach ($InstanceInterface in $Instance.NetworkInterfaces)
+		{
+			[Amazon.EC2.Model.InstanceNetworkInterface]$InstanceInterface= $InstanceInterface
+			[Amazon.EC2.Model.NetworkInterface]$Interface = Get-EC2NetworkInterface -NetworkInterfaceId $InstanceInterface.NetworkInterfaceId @Splat
+
+			$Interfaces += $Interface
+
+			[Amazon.EC2.Model.InstanceNetworkInterfaceSpecification]$Spec = New-Object -TypeName Amazon.EC2.Model.InstanceNetworkInterfaceSpecification
+			
+			if ($Interface.Association -ne $null)
+			{
+				$Spec.AssociatePublicIpAddress = $true
+			}
+
+			$Spec.DeleteOnTermination = $Interface.Attachment.DeleteOnTermination
+
+			if (-not [System.String]::IsNullOrEmpty($Interface.Description))
+			{
+				$Spec.Description = $Interface.Description
+			}
+
+			$Spec.DeviceIndex = $Interface.Attachment.DeviceIndex
+
+			$Spec.Groups = $Interface.Groups | Select-Object -ExpandProperty GroupId
+
+			if ($Interface.Ipv6Addresses -ne $null -and $Interface.Ipv6Addresses.Count -gt 0)
+			{
+				[Amazon.EC2.Model.InstanceIpv6Address[]]$Addresses = @()
+				foreach ($IPv6 in $Interface.Ipv6Addresses)
+				{
+					[Amazon.EC2.Model.InstanceIpv6Address]$Address = New-Object -TypeName Amazon.EC2.Model.InstanceIpv6Address
+					$Address.Ipv6Address = $IPv6
+					$Addresses += $Address
+				}
+
+				$Spec.Ipv6Addresses = $Addresses
+			}
+
+			[Amazon.EC2.Model.PrivateIpAddressSpecification[]]$PrivateIPs = @()
+
+			foreach ($IP in $Interface.PrivateIpAddresses)
+			{
+				[Amazon.EC2.Model.NetworkInterfacePrivateIpAddress]$IP = $IP
+				[Amazon.EC2.Model.PrivateIpAddressSpecification]$PrivateIp = New-Object -TypeName Amazon.EC2.Model.PrivateIpAddressSpecification
+				$PrivateIp.Primary = $IP.Primary
+				$PrivateIp.PrivateIpAddress = $IP.PrivateIpAddress
+
+				$PrivateIPs += $PrivateIp
+			}
+
+			$Spec.PrivateIpAddresses = $PrivateIPs
+
+			$Spec.SubnetId = $Interface.SubnetId
+
+			$NetworkInterfaceSpecifications += $Spec
+		}
+
+		$NewInstanceSplat.Add("NetworkInterface", $NetworkInterfaceSpecifications)
+
+		#### Do all block device stuff here
+
+		[Amazon.EC2.Model.BlockDeviceMapping[]]$BlockDevices = @()
+
+		# Track volumes for use later in tagging
+		[Amazon.EC2.Model.Volume[]]$Volumes = @()
+
+		foreach ($Device in $Instance.BlockDeviceMappings)
+		{
+			[Amazon.EC2.Model.InstanceBlockDeviceMapping]$Device = $Device
+			[Amazon.EC2.Model.EbsInstanceBlockDevice]$Ebs = $Device.Ebs
+
+			if ($Ebs -ne $null)
+			{
+				[Amazon.EC2.Model.BlockDeviceMapping]$BDM = New-Object -TypeName Amazon.EC2.Model.BlockDeviceMapping
+				$BDM.Ebs = New-Object -TypeName Amazon.EC2.Model.EbsBlockDevice
+
+				$BDM.DeviceName = $Device.DeviceName
+
+				[Amazon.EC2.Model.Volume]$Volume = Get-EC2Volume -VolumeId $Ebs.VolumeId @Splat
+				$Volumes += $Volume
+
+				$BDM.Ebs.DeleteOnTermination = $Ebs.DeleteOnTermination
+				$BDM.Ebs.Encrypted = $Volume.Encrypted
+				$BDM.Ebs.VolumeType = $Volume.VolumeType
+
+				if ($Volume.VolumeType -eq [Amazon.EC2.VolumeType]::Io1)
+				{
+					$BDM.Ebs.Iops = $Volume.Iops
+				}
+
+				if (-not [System.String]::IsNullOrEmpty($Volume.KmsKeyId))
+				{
+					$BDM.Ebs.KmsKeyId = $Volume.KmsKeyId
+				}
+				
+				$BDM.Ebs.VolumeSize = $Volume.Size
+
+				if (-not [System.String]::IsNullOrEmpty($Volume.SnapshotId))
+				{
+					$BDM.Ebs.SnapshotId = $Volume.SnapshotId
+				}
+
+				$BlockDevices += $BDM	
+			}		
+		}
+
+		if ($BlockDevices.Count -gt 0)
+		{
+			$NewInstanceSplat.Add("BlockDeviceMapping", $BlockDevices)
+		}
+
+		##### TAGGING
+
+		[Amazon.EC2.Model.TagSpecification[]]$TagSpecification = @()
+
+		# Instance Tags
+		if ($Instance.Tags.Count -gt 0)
+		{
+			# Instance Tags
+			[Amazon.EC2.Model.TagSpecification]$InstanceTags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
+
+			$InstanceTags.ResourceType = [Amazon.EC2.ResourceType]::Instance
+
+			$InstanceTags.Tags = $Instance.Tags
+
+			$TagSpecification += $InstanceTags
+		}
+
+		# Volume Tags
+		if ($Volumes.Count -gt 0 -and -not $NoVolumeTags)
+		{
+			[Amazon.EC2.Model.TagSpecification]$VolumeTags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
+
+			$VolumeTags.ResourceType = [Amazon.EC2.ResourceType]::Volume
+
+			[System.Collections.Generic.Dictionary[System.String, Amazon.EC2.Model.Tag]]$VolumeTagDictionary = New-Object -TypeName "System.Collections.Generic.Dictionary[System.String, Amazon.EC2.Model.Tag]"
+
+			# If there's only 1 volume, then it's easy
+			if ($OnlyRootVolumeTags)
+			{
+				$VolumeTags.Tags = $Volumes | Where-Object {$_.Attachments[0].Device -eq $Instance.RootDeviceName } | Select-Object -ExpandProperty Tags
+			}
+			elseif ($Volumes.Count -eq 1)
+			{
+				$VolumeTags.Tags = $Volumes[0].Tags			
+			}
+			else
+			{
+				if ($MatchVolumeTagKeyAndValue)
+				{
+					foreach ($Tag in $Volumes[0].Tags)
+					{
+						$Counter = 1
+
+						for ($i = 1; $i -lt $Volumes.Count; $i++)
+						{
+							foreach ($SubTag in $Volumes[$i].Tags)
+							{
+								# Make sure to use case-sensitive comparison
+								if ($SubTag.Key -eq $Tag.Key -and $SubTag.Value -eq $Tag.Value)
+								{
+									$Counter++
+									break
+								}
+							}
+						}
+
+						if ($Counter -eq $Volumes.Count)
+						{
+							$VolumeTagDictionary.Add($Tag.Key, $Tag)
+						}
+					}
+				}
+				elseif($MatchVolumeTagKey)
+				{
+					foreach ($Tag in $Volumes[0].Tags)
+					{
+						$AllHaveTag = $true
+
+						for ($i = 1; $i -lt $Volumes.Count; $i++)
+						{
+							# Make sure to use case-sensitive comparison
+							if (($Volumes[$i].Tags | Select-Object -ExpandProperty Key) -notcontains $Tag.Key)
+							{
+								$AllHaveTag = $false
+								break
+							}
+						}
+
+						if ($AllHaveTag)
+						{
+							$VolumeTagDictionary.Add($Tag.Key, $Tag)
+						}
+					}
+				}
+				else
+				{
+					foreach ($Volume in $Volumes)
+					{
+						foreach ($Tag in $Volume.Tags)
+						{
+							if (-not $VolumeTagDictionary.ContainsKey($Tag.Key))
+							{
+								$VolumeTagDictionary.Add($Tag.Key, $Tag)
+							}
+						}
+					}
+				}
+
+				if ($VolumeTagDictionary.Count -gt 0)
+				{
+					$VolumeTags.Tags = $VolumeTagDictionary.Values
+					$TagSpecification += $VolumeTags
+				}
+			}
+		}
+		
+		# Network Interface Tags
+		if ($Interfaces.Count -gt 0 -and -not $NoInterfaceTags)
+		{
+			[Amazon.EC2.Model.TagSpecification]$InterfaceTags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
+
+			$InterfaceTags.ResourceType = [Amazon.EC2.ResourceType]::NetworkInterface
+
+			[System.Collections.Generic.Dictionary[System.String, Amazon.EC2.Model.Tag]]$InterfaceTagDictionary = New-Object -TypeName "System.Collections.Generic.Dictionary[System.String, Amazon.EC2.Model.Tag]"
+
+			# If there's only 1 interface, then it's easy
+			if ($OnlyRootInterfaceTags)
+			{
+				$InterfaceTags.Tags = $Interfaces | Where-Object {$_.Attachment.DeviceIndex -eq 0} | Select-Object -First 1 | Select-Object -ExpandProperty TagSet
+			}
+			elseif ($Interfaces.Count -eq 1)
+			{
+				$InterfaceTags.Tags = $Interfaces[0].TagSet
+			}
+			else
+			{
+				# Otherwise, there's more than 1 and we need to perform additional checks
+				if ($MatchInterfaceTagKeyAndValue)
+				{
+					foreach ($Tag in $Interfaces[0].TagSet)
+					{
+						$Counter = 1
+
+						for ($i = 1; $i -lt $Interfaces.Count; $i++)
+						{
+							foreach ($SubTag in $Interfaces[$i].TagSet)
+							{
+								# Make sure to use case-sensitive comparison
+								if ($SubTag.Key -eq $Tag.Key -and $SubTag.Value -eq $Tag.Value)
+								{
+									$Counter++
+									break
+								}
+							}
+						}
+
+						if ($Counter -eq $Interfaces.Count)
+						{
+							$InterfaceTagDictionary.Add($Tag.Key, $Tag)
+						}
+					}
+				}
+				elseif($MatchInterfaceTagKey)
+				{
+					foreach ($Tag in $Interfaces[0].TagSet)
+					{
+						$AllHaveTag = $true
+
+						for ($i = 1; $i -lt $Interfaces.Count; $i++)
+						{
+							# Make sure to use case-sensitive comparison
+							if (($Interfaces[$i].TagSet | Select-Object -ExpandProperty Key) -notcontains $Tag.Key)
+							{
+								$AllHaveTag = $false
+								break
+							}
+						}
+
+						if ($AllHaveTag)
+						{
+							$InterfaceTagDictionary.Add($Tag.Key, $Tag)
+						}
+					}
+				}
+				else
+				{
+					foreach ($Interface in $Interfaces)
+					{
+						foreach ($Tag in $Interface.TagSet)
+						{
+							if (-not $InterfaceTagDictionary.ContainsKey($Tag.Key))
+							{
+								$InterfaceTagDictionary.Add($Tag.Key, $Tag)
+							}
+						}
+					}		
+				}
+
+				if ($InterfaceTagDictionary.Count -gt 0)
+				{
+					$InterfaceTags.Tags = $InterfaceTagDictionary.Values
+
+					$TagSpecification += $InterfaceTags
+				}
+			}	
+		}
+
+		if ($TagSpecification.Count -gt 0)
+		{
+			$NewInstanceSplat.Add("TagSpecification", $TagSpecification)
+		}
+
+		#### Write Output to Pipeline
+
+        Write-Output -InputObject $NewInstanceSplat      
+    }
+
+    End {
+    }
+}
+
+Function Dismount-EC2InstanceNetworkInterfaces {
+	<#
+		.SYNOPSIS
+			Dismounts either specific or all network interfaces (except eth0) from a single EC2 instance.
+
+		.DESCRIPTION
+			The cmdlet dismounts network interfaces from an EC2 instance. If you specify specific network interface Ids, just these will be dismounted from the instance, otherwise all network interfaces, except eth0, will attempt to be dismounted. 
+
+		.PARAMETER InstanceId
+			The Id of the instance to dismount network interfaces from.  
+
+		.PARAMETER Instance
+			The instance object to dismount network interfaces from.
+
+		.PARAMETER NetworkInterfaceId
+			The Ids of the network interfaces to dismount from the specified instance. If this parameter is not specified, all network interfaces, except eth0, are dismounted.
+
+		.PARAMETER Wait
+			This will wait for the network interfaces to finish being dismounted and enter the available state.
+
+        .PARAMETER ForceDismount
+            Forces the dismount of the interface.
+
+		.PARAMETER Delete
+			The network interfaces will be deleted after they are dismounted. If you specify this parameter, the Wait parameter is automatically specified.
+
+		.PARAMETER Timeout
+			The amount of time to wait in seconds for the operation to complete before it is considered unsuccessful. Defaults to 600.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$Instance = Get-EC2Instance -InstanceId i-09740780dc39bde98 | Select-Object -ExpandProperty Instances -First 1
+			Dismount-EC2InstanceNetworkInterfaces -Instance $Instance -Wait
+
+			All network interfaces, except eth0, are dismounted from the instance. The cmdlet waits for the itnerfaces to enter the available state indicating the dismount operation succeeded.
+
+		.EXAMPLE
+			$Instance = Get-EC2Instance -InstanceId i-09740780dc39bde98 | Select-Object -ExpandProperty Instances -First 1
+			Dismount-EC2InstanceNetworkInterfaces -InstanceId $Instance.InstanceId -NetworkInterfaceId @("eni-0aa65525bf363acfe") -Wait
+
+			The specified ENI is dismounted from the indicated instance. The cmdlet waits for the interface to become available before returning.
+
+		.EXAMPLE
+			$Instance = Get-EC2Instance -InstanceId i-09740780dc39bde98 | Select-Object -ExpandProperty Instances -First 1
+			Dismount-EC2InstanceNetworkInterfaces -Instance $Instance -Delete
+
+			All network interfaces, except eth0, are dismounted from the instance. Once the interfaces enter an available state, they are deleted. The cmdlet does not wait for the delete operation to complete.
+
+		.INPUTS
+			None or Amazon.EC2.Model.Instance
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject[]
+
+			The output contains the network interface id and the device index the interface was attached to on the instance. For example:
+
+			@(
+				[PSCustomObject]@{ "NetworkInterfaceId" = "eni-0aa65525bf363acfe"; "DeviceIndex" = "1" },
+				[PSCustomObject]@{ "NetworkInterfaceId" = "eni-03eaea54d02ec33dc"; "DeviceIndex" = "2" }
+			)
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/30/2019
+	#>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = [System.Management.Automation.ConfirmImpact]::Medium)]
+	[OutputType([PSCustomObject[]])]
+    Param(
+        [Parameter(Mandatory = $true, ParameterSetName = "InstanceId")]
+        [ValidateNotNullOrEmpty()]
+        [System.String]$InstanceId,
+
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0, ParameterSetName = "Instance")]
+        [ValidateNotNull()]
+        [Amazon.EC2.Model.Instance]$Instance,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [System.String[]]$NetworkInterfaceId = @(),
+
+        [Parameter()]
+        [Switch]$Wait,
+
+		[Parameter()]
+		[Switch]$Delete,
+
+        [Parameter()]
+        [Switch]$ForceDismount,
+
+		[Parameter()]
+		[Switch]$Force,
+
+        [Parameter()]
+        [ValidateRange(1, [System.Int32]::MaxValue)]
+        [System.Int32]$Timeout = 600,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+    )
+
+    Begin {
+		[System.Boolean]$YesToAll = $false
+		[System.Boolean]$NoToAll = $false
+    }
+
+    Process {
+        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+
+        [System.Collections.Generic.Queue[Amazon.EC2.Model.NetworkInterface]]$InterfacesToDetach = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.NetworkInterface]
+        [System.Collections.Generic.Dictionary[System.String, System.String]]$TrackedInterfaces = New-Object -TypeName "System.Collections.Generic.Dictionary[System.String, System.String]"
+        [PSCustomObject[]]$DetachedInterfaces = @()
+
+        if ($PSCmdlet.ParameterSetName -eq "InstanceId")
+        {
+            $Instance = Get-EC2InstanceByNameOrId -InstanceId $InstanceId @AwsUtilitiesSplat
+
+            if ($Instance -eq $null)
+            {
+                throw "Could not find an instance with id $InstanceId."
+            }
+        }
+
+		# The instance is terminated or in the process of termination 
+        if ($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Terminated -or $Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::ShuttingDown)
+        {
+            throw "This cmdlet cannot be used on an instance that is terminating or terminated."
+        }
+
+		# This will make sure the block device mappings are populated for a pending instance before tracking the volumes
+		if($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Pending -and $Instance.NetworkInterfaces -eq $null -or $Instance.NetworkInterfaces.Count -eq 0)
+		{
+			Write-Verbose -Message "Waiting for instance to populate network interfaces during pending state."
+			Start-Sleep -Seconds 5
+            $Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+		}
+
+		[Amazon.EC2.Model.InstanceNetworkInterface[]]$Interfaces = $Instance.NetworkInterfaces | Where-Object { $_.Attachment.DeviceIndex -ne 0 }
+
+        # Do this first so that we don't lose any data
+        # Check to see if the user passed network interface Ids, and if they didn't make sure the instance has actual network interfaces
+        # It's possible the user passes in a stopped instance that already has all block devices removed
+        if ($NetworkInterfaceId -eq $null -or $NetworkInterfaceId.Count -eq 0 -and $Interfaces -ne $null -and $Interfaces.Count -gt 0)
+        {
+            $NetworkInterfaceId = $Interfaces | Select-Object -ExpandProperty NetworkInterfaceId
+            
+            foreach ($Interface in $Interfaces)
+            { 
+                $TrackedInterfaces.Add($Interface.NetworkInterfaceId, $Interface.Attachment.DeviceIndex)
+            } 
+        }
+		else
+		{
+			# Make sure the user provided volume Ids are attached to the specified instance
+
+			[System.String[]]$AttachedInterfaceIds = $Interfaces | Select-Object -ExpandProperty NetworkInterfaceId
+			
+			foreach ($Interface in $NetworkInterfaceId)
+			{
+				if ($Interface -inotin $AttachedInterfaceIds)	
+				{
+					throw "A provided interface, $Interface, is not one of the attached interfaces for instance $($Instance.InstanceId): $([System.String]::Join(",", $AttachedInterfaceIds))."
+				}
+			}
+		}
+
+		# Cannot remove volumes from a pending instance, make sure the instance leaves pending
+		while ($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Pending)
+		{
+			Write-Verbose -Message "Waiting for instance to reaching a running state."
+			Start-Sleep -Seconds 5
+            $Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+		}
+
+        # It's possible the instance description was not returned with the interface data if the instance
+        # was recently launched, wait to get that data, there will always be at least 1 interface
+        while ($Instance -ne $null -and 
+            $Instance.State.Name -notin @([Amazon.EC2.InstanceStateName]::ShuttingDown,[Amazon.EC2.InstanceStateName]::Terminated) -and 
+            $Instance.NetworkInterfaces -eq $null -or $Instance.NetworkInterfaces.Count -eq 0)
+        {
+            Write-Verbose -Message "Waiting for network interface data in the instance object to be returned, instance $($Instance.InstanceId) is currently $($Instance.State.Name)."
+            Start-Sleep -Seconds 5
+            $Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+        }
+
+        if ($NetworkInterfaceId -ne $null -and $NetworkInterfaceId.Count -gt 0)
+        {
+		    $VerboseDescription = "Dismount network interfaces $([System.String]::Join(",", $NetworkInterfaceId)) from instance $($Instance.InstanceId)"
+		    $VerboseWarning = "Are you sure you want dismount network interfaces $([System.String]::Join(",", $NetworkInterfaceId)) from $($Instance.InstanceId)?"
+		    $Caption = "Dismount Network Interfaces"
+
+		    if ($PSCmdlet.ShouldProcess($VerboseDescription, $VerboseWarning, $Caption))
+		    {
+                [System.Collections.Hashtable]$IntSplat = @{}
+                if ($ForceDismount)
+                {
+                    $IntSplat.Add("ForceDismount", $true)
+                }
+
+			    foreach ($Id in $NetworkInterfaceId)
+			    {
+				    $Query = "Dismount network interface $Id from instance $($Instance.InstanceId)?"
+				    $Caption = "Dismount Network Interface"
+
+				    if ($Force -or $PSCmdlet.ShouldContinue($Query, $Caption, [ref]$YesToAll, [ref]$NoToAll))
+				    {
+					    [Amazon.EC2.Model.NetworkInterface]$Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Id @Splat
+
+                        # If the interface is attached, then proceed with dismounting it
+                        if ($Interface.Attachment -ne $null -and -not [System.String]::IsNullOrEmpty($Interface.Attachment.AttachmentId))
+                        {
+					        $InterfacesToDetach.Enqueue($Interface)
+
+					        Write-Verbose -Message "Dismounting interface $($Interface.NetworkInterfaceId) at device index $($Interface.Attachment.DeviceIndex) from the instance."				
+					        Dismount-EC2NetworkInterface -AttachmentId $Interface.Attachment.AttachmentId @Splat @IntSplat | Out-Null	
+
+                            # May have already been added previously, but if not, then add it, we know it has attachment data
+                            if (-not $TrackedInterfaces.ContainsKey($Interface.NetworkInterfaceId))
+                            {
+					            $TrackedInterfaces.Add($Interface.NetworkInterfaceId, $Interface.Attachment.DeviceIndex)
+                            }		
+                        }
+                        else
+                        {
+                            Write-Verbose -Message "It appears that interface $Id became dismounted during the cmdlet operation, the DescribeNetworkInterfaces API did not return Attachment data, its device index may not be tracked."
+                            
+                            # If it's not attached, and we haven't already added it, write a verbose message and add it with a -1 index
+                            if (-not $TrackedInterfaces.ContainsKey($Interface.NetworkInterfaceId))
+                            {
+                                $TrackedInterfaces.Add($Interface.NetworkInterfaceId, -1)
+                            }
+                        }
+				    }
+			    }
+
+			    $YesToAll = $false
+			    $NoToAll = $false
+
+			    if ($Wait -or $Delete)
+			    {
+				    [System.Diagnostics.Stopwatch]$SW = [System.Diagnostics.Stopwatch]::StartNew()
+
+				    while ($InterfacesToDetach.Count -gt 0 -and $SW.Elapsed.TotalSeconds -le $Timeout)
+				    {
+					    [Amazon.EC2.Model.NetworkInterface]$Interface = $InterfacesToDetach.Dequeue()
+
+					    switch ($Interface.Status)
+					    {
+						    ([Amazon.EC2.NetworkInterfaceStatus]::Available) {
+							    Write-Verbose -Message "Successfully detached interface $($Interface.NetworkInterfaceId) from $($Instance.InstanceId)."     
+                        
+							    if ($Delete)
+							    {
+								    Write-Verbose -Message "Deleting interface $($Interface.NetworkInterfaceId)"
+
+								    $Query = "Permanently delete Network Interface $($Interface.NetworkInterfaceId)?"
+								    $Caption = "Delete Network Interface"
+
+								    if ($Force -or $PSCmdlet.ShouldContinue($Query, $Caption, [ref]$YesToAll, [ref]$NoToAll))
+								    {
+									    Remove-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId -Force @Splat | Out-Null
+								    }
+							    }
+                                     
+							    break
+						    }
+						    {$_ -in @([Amazon.EC2.NetworkInterfaceStatus]::InUse, [Amazon.EC2.NetworkInterfaceStatus]::Detaching) } {
+							    # Keep waiting
+							    $InterfacesToDetach.Enqueue($Interface)
+							    break
+						    }
+						    {$_ -in @([Amazon.EC2.NetworkInterfaceStatus]::Associated, [Amazon.EC2.NetworkInterfaceStatus]::Attaching) } {
+							    throw "Invalid state for interface $($Interface.NetworkInterfaceId): $($Interface.Status)."
+						    }
+						    default {
+							    throw "Unknown interface state $($Interface.Status) for interface $($Interface.NetworkInterfaceId)."
+						    }
+					    }
+
+					    # Only update the interface list if all of them are not available
+					    if ($InterfacesToDetach.Count -gt 0 -and ($InterfacesToDetach | Where-Object { $_.Status -ne [Amazon.EC2.NetworkInterfaceStatus]::Available}).Count -eq $InterfacesToDetach.Count)
+					    {
+						    Write-Verbose -Message "Waiting for interfaces to finish detaching."
+						    Start-Sleep -Seconds 10
+
+						    $Arr = $InterfacesToDetach.ToArray()
+
+						    $InterfacesToDetach = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.NetworkInterface]
+
+						    for ($i = 0; $i -lt $Arr.Length; $i++)
+						    {
+							    $InterfacesToDetach.Enqueue((Get-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId @Splat))
+						    }
+					    }
+				    }
+
+				    $SW.Stop()
+
+				    if ($SW.Elapsed.TotalSeconds -gt $Timeout -and $InterfacesToDetach.Count -gt 0)
+				    {
+					    throw "Timeout occured waiting for interfaces to finish being dismounted. Did not finish dismounting interfaces $([System.String]::Join(",", ($InterfacesToDetach | Select-Object -ExpandProperty NetworkInterfaceId)))."
+				    }
+			    }
+
+                foreach ($Key in $TrackedInterfaces.Keys)
+                {
+                    $DetachedInterfaces += [PSCustomObject]@{"NetworkInterfaceId" = $Key; "DeviceIndex" = $TrackedInterfaces[$Key]}
+                }
+
+			    Write-Output -InputObject $DetachedInterfaces
+		    }
+        }
+        else
+        {
+            Write-Verbose -Message "No interfaces to detach."
+            Write-Output -InputObject $DetachedInterfaces
+        }
+    }
+
+    End {
+    }
+}
+
+Function Invoke-EC2NetworkInterfaceAttachmentWait {
+    <#
+        .SYNOPSIS 
+            Waits for a specified set of volumes to reach an attached state.
+
+        .DESCRIPTION
+            The cmdlet waits for a specified set of volumes to be in-use and attached to an EC2 instance.
+
+        .PARAMETER NetworkInterface
+            The network interface(s) to wait to become attached.
+
+        .PARAMETER NetworkInterfaceId
+            The network interface Id(s) to wait to become attached.
+
+        .PARAMETER Timeout
+            The amount of time in seconds to wait before the cmdlet fails. Defaults to 600.
+
+        .PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+
+        .EXAMPLE
+            Invoke-EC2NetworkInterfaceAttachmentWait -NetworkInterfaceId @("eni-0f8d10b5ca8259a17", "eni-03fa72bf6ed7c2ed3")
+
+            This waits for the two specified network interfaces to be in use and attached to an instance.
+
+        .INPUTS
+            Amazon.EC2.Model.NetworkInterface[]
+
+        .OUTPUTS
+            None
+
+        .NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/30/2019
+    #>
+    
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = "NetworkInterfaceId")]
+        [ValidateNotNullOrEmpty()]
+        [System.String[]]$NetworkInterfaceId,
+
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ParameterSetName = "NetworkInterface")]
+        [ValidateNotNullOrEmpty()]
+        [Amazon.EC2.Model.NetworkInterface[]]$NetworkInterface,
+
+        [Parameter()]
+        [ValidateRange(1, [System.Int32]::MaxValue)]
+        [System.Int32]$Timeout = 600,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+    )
+
+    Begin {
+		if ($PSCmdlet.ParameterSetName -eq "NetworkInterface")
+        {
+            $NetworkInterfaceId = $NetworkInterface | Select-Object -ExpandProperty NetworkInterfaceId
+        }
+    }
+
+    Process {
+        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+
+        # Use "," trick to preven the array from being unrolled
+        [System.Collections.Generic.Queue[System.String]]$ENIQueue = New-Object -TypeName System.Collections.Generic.Queue[System.String] -ArgumentList (,$NetworkInterfaceId)
+
+        [System.Diagnostics.Stopwatch]$SW = [System.Diagnostics.Stopwatch]::StartNew()
+
+        # Track the source volumes that are now attached to the new instance to make sure they finish attaching
+        while ($ENIQueue.Count -gt 0 -and $SW.Elapsed.TotalSeconds -le $Timeout)
+        {
+            [System.String]$Id = $ENIQueue.Dequeue()
+            [Amazon.EC2.Model.NetworkInterface]$Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Id @Splat
+
+            switch ($Interface.Status)
+            {
+                ([Amazon.EC2.NetworkInterfaceStatus]::InUse) {
+                    Write-Verbose -Message "ENI $($Interface.NetworkInterfaceId) is attached to $($Interface.Attachment.InstanceId)."
+                    break
+                }
+                { $_ -in @([Amazon.EC2.NetworkInterfaceStatus]::Attaching, [Amazon.EC2.NetworkInterfaceStatus]::Available) } {                  
+                    $ENIQueue.Enqueue($Id)
+                    break
+                }
+                {$_ -in @([Amazon.EC2.NetworkInterfaceStatus]::Associated, [Amazon.EC2.NetworkInterfaceStatus]::Detaching) } {
+                    throw "The interface $($Interface.NetworkInterfaceId) is not in an expected state to be waited on for attachment."
+                }
+                default {
+                    throw "Unknown interface state $($Interface.Status) for interface $($Interface.NetworkInterfaceId)."
+                }
+            }
+
+            if (($ENIQueue | Where-Object { $_.Status -ne [Amazon.EC2.NetworkInterfaceStatus]::InUse }).Count -gt 0)
+            {
+                Write-Verbose -Message "Waiting for interfaces to finish attaching."
+                Start-Sleep -Seconds 10
+            }
+        }
+
+        $SW.Stop()
+
+        if ($SW.Elapsed.TotalSeconds -gt $Timeout)
+        {
+            throw "Timeout waiting for all interfaces to finish attaching."
+        }
+    }
+
+    End {
+    }
+}
+
+Function Update-EC2InstanceImageId {
+	<#
+		.SYNOPSIS
+			Changes the AMI id of a currently launched instance.
+
+		.DESCRIPTION
+			The cmdlet stops the source EC2 instance, detaches its EBS volumes and ENIs (except eth0), terminates the instance, launches a new EC2 instance with the specified AMI id and any configuration items like sriovsupport enabled, stops it, deletes its EBS volumes, attaches the source volumes and ENIs, and restarts the new EC2 instance.
+
+		.PARAMETER InstanceId
+			The id of the instance to update. 
+
+		.PARAMETER InstanceName
+			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique to target an instance this way.
+
+		.PARAMETER NewImageId
+			The new AMI id to launch the EC2 instance with.
+
+		.PARAMETER Timeout
+			The amount of time in seconds to wait for each action to succeed. There are multiple actions, each with their own timeout. This defaults to 600.
+
+        .PARAMETER PassThru
+            If specified, the new instance object will be returned to the pipeline.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			Update-EC2InstanceAmiId -InstanceId i-123456789012 -NewImageId "ami-123456789012"
+
+			Changes the AMI id being used for the specified instance. You will be prompted to confirm certain actions.
+
+        .EXAMPLE
+			Update-EC2InstanceAmiId -InstanceId i-123456789012 -NewImageId "ami-123456789012" -Force
+
+			Changes the AMI id being used for the specified instance. The Force parameter will bypass the confirmation prompts.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			None or Amazon.EC2.Model.Instance
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/30/2019
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$NewImageId,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
+		[Alias("Name")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceName,
+
+		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$InstanceId,
+
+		[Parameter()]
+        [ValidateSet(1, [System.Int32]::MaxValue)]
+		[System.Int32]$Timeout = 600,
+
+        [Parameter()]
+        [Switch]$PassThru,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+
+		$InstanceSplat = @{}
+
+		if ($PSCmdlet.ParameterSetName -eq "Id")
+		{
+			Write-Verbose -Message "Using instance id $InstanceId to update the image id."
+			$InstanceSplat.Add("InstanceId", $InstanceId)
+		}
+		else
+		{
+			Write-Verbose -Message "Using instance name $InstanceName to update the image id."
+			$InstanceSplat.Add("InstanceName", $InstanceName)
+		}
+
+		# Get the source EC2 instance
+		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
+
+        $Activity = "Updating the Image Id for instance $($Instance.InstanceId) to $NewImageId."
+        $TotalSteps = 14
+        $CurrentStep = 0
+        
+        Write-Progress -Activity $Activity -Status "Stopping source instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++	
+
+		# Stop the source EC2 instance
+        Write-Verbose -Message "Stopping the source instance."
+		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
+
+        Write-Progress -Activity $Activity -Status "Detaching source instance network interfaces" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        ##### DETACH EBS VOLUMES AND NETWORK INTERFACES FROM SOURCE
+        # This must all be done first so we can terminate the old instance and launch the new instance with the same private IP
+
+        Write-Verbose -Message "Detaching source instance network interfaces."
+        # Objects have NetworkInterfaceId and DeviceIndex properties
+        [PSCustomObject[]]$InterfacesToAdd = Dismount-EC2InstanceNetworkInterfaces -Instance $Instance -Wait -Timeout $Timeout @AwsUtilitiesSplat
+
+        Write-Verbose -Message "All source interfaces have been detached from source instance."
+        Write-Host "***** Source interfaces that will be attached *****"
+
+        foreach ($Interface in $InterfacesToAdd)
+        {
+            Write-Host "$($Interface.DeviceIndex) : $($Interface.NetworkInterfaceId)"
+        }
+
+        Write-Host ""
+
+        Write-Progress -Activity $Activity -Status "Detaching source instance EBS volumes" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        Write-Verbose -Message "Detaching source instance EBS volumes."
+        
+        # Objects have VolumeId and Device properties
+        [PSCustomObject[]]$VolumesToAdd = Dismount-EBSVolumes -Instance $Instance -Wait -Timeout $Timeout -IncludeRootVolume @AwsUtilitiesSplat
+		
+        Write-Verbose -Message "All source volumes have been detached from source instance."
+        Write-Host "***** Source volumes that will be attached *****"
+
+        foreach ($Volume in $VolumesToAdd)
+        {
+            Write-Host "$($Volume.Device) : $($Volume.VolumeId)"
+        }
+
+        Write-Host ""
+
+        ##### GET LAUNCH PARAMETERS FROM THE SOURCE EC2 INSTANCE #####      
+
+        Write-Progress -Activity $Activity -Status "Copying source instance launch parameters" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        # Build some optional parameters for New-EC2Instance
+		[System.Collections.Hashtable]$NewInstanceSplat = Copy-EC2InstanceLaunchParameters -Instance $Instance @AwsUtilitiesSplat
+        
+        # Remove all NetworkInterface items except the root device, they will be dismounted from
+        # source and attached to new
+
+        [System.Boolean]$PrimaryInterfaceHasMultipleIps = $false
+
+        if ($NewInstanceSplat.ContainsKey("NetworkInterface"))
+        {
+            [Amazon.EC2.Model.InstanceNetworkInterfaceSpecification[]]$RootInterface = $NewInstanceSplat["NetworkInterface"] | Where-Object {$_.DeviceIndex -eq 0 } | Select-Object -First 1
+            
+            # If we try to an IP (or multiple IPs) to a InstanceNetworkInterfaceSpecification, it results in an error: The parameter PrivateIpAddressesSet is not recognized
+            $NewInstanceSplat.Remove("NetworkInterface")
+            $NewInstanceSplat.Add("PrivateIpAddress", $RootInterface.PrivateIpAddress)
+            $NewInstanceSplat.Add("SecurityGroupId", $RootInterface.Groups)
+        }
+
+        # Remove all BlockDeviceMapping items, all block devices will be directly dismounted
+        # from source and attached to new
+        if ($NewInstanceSplat.ContainsKey("BlockDeviceMapping"))
+        {
+            $NewInstanceSplat.Remove("BlockDeviceMapping")
+        }
+		
+        # 1) Public IP & Public DNS & Association w/ Account Number Owner - EIP assigned to primary private IP
+        # 2) Public DNS & No Public IP & No Association - EIP assigned to one or more secondary IPs on eth0
+        # 3) Public IP & Public DNS & Association w/ Amazon Owner - Amazon assigned public IP
+
+        [Amazon.EC2.Model.Address[]]$EIPs = @()
+
+        # This will get the the association for the eth0 interface
+            [Amazon.EC2.Model.InstanceNetworkInterfaceAssociation]$Association = $Instance.NetworkInterfaces | 
+                Where-Object {$_.Attachment.DeviceIndex -eq 0 } | 
+                Select-Object -First 1 -ExpandProperty Association
+
+        if (($Association -ne $null -and $Association.IpOwnerId -ine "amazon") -or
+            -not [System.String]::IsNullOrEmpty($Instance.PublicIpAddress) -or 
+            -not [System.String]::IsNullOrEmpty($Instance.PublicDnsName))
+        {
+            # EIP on eth0
+            [Amazon.EC2.Model.InstanceNetworkInterface]$Eth0 = $Instance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -eq 0 } | Select-Object -First 1
+            $EIPs = Get-EC2Address -Filter @{Name = "instance-id"; Value = $Instance.InstanceId}, @{Name = "network-interface-id"; Value = $Eth0.NetworkInterfaceId} @Splat
+        }
+
+        ##### TERMINATE THE SOURCE INSTANCE
+
+        Write-Progress -Activity $Activity -Status "Terminating source instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        Write-Host "Terminating source instance."
+        Set-EC2InstanceState -InstanceId $Instance.InstanceId -State TERMINATE -Wait -Force -Timeout $Timeout @AwsUtilitiesSplat
+
+        ##### LAUNCH NEW INSTANCE
+
+        Write-Progress -Activity $Activity -Status "Launching new instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        Write-Host "Launching new instance."
+	
+		Write-Verbose -Message @"
+Launching new instance:
+	Type:              $($Instance.InstanceType)
+    Image Id:          $NewImageId
+    Old Image Id:      $($Instance.ImageId)
+	Subnet:            $($Instance.SubnetId)
+	Security Groups:   $([System.String]::Join(",", ($Instance.SecurityGroups | Select-Object -ExpandProperty GroupId)))
+	AZ:                $($Instance.Placement.AvailabilityZone)
+	IAM Profile:       $($Instance.IamInstanceProfile.Arn)
+	Private IP:        $($Instance.PrivateIPAddress)
+	Tenancy:           $($Instance.Placement.Tenancy)
+"@
+
+		[Amazon.EC2.Model.Instance]$NewInstance = $null
+
+        [System.String]$Token = [System.Guid]::NewGuid().ToString()
+
+		$Temp = New-EC2Instance -ClientToken $Token `
+                        -ImageId $NewImageId `
+						@NewInstanceSplat @Splat
+
+		if ($Temp -eq $null)
+		{
+			throw "Could not create the new instance."
+		}
+
+		[Amazon.EC2.Model.Instance]$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $Temp.Instances[0].InstanceId @AwsUtilitiesSplat
+
+        Write-Progress -Activity $Activity -Status "Stopping new instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+        
+		Write-Verbose -Message "Stopping new instance."
+
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
+
+        Write-Progress -Activity $Activity -Status "Updating instance attributes" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        # Update the srIovNetSupport and ENA attributes for the instance
+
+		if (-not [System.String]::IsNullOrEmpty($Instance.SriovNetSupport))
+		{
+			Write-Verbose -Message "Enabling SrIovNetSupport"
+			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -SriovNetSupport $Instance.SriovNetSupport @Splat | Out-Null
+		}
+
+		if ($Instance.EnaSupport -eq $true)
+		{
+			Write-Verbose -Message "Enabling ENA"
+			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -EnaSupport $true @Splat | Out-Null
+		}
+
+        Write-Progress -Activity $Activity -Status "Removing EBS volumes from the new instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        # Remove existing EBS volume(s) from the new instance
+
+        Write-Verbose -Message "Removing EBS volumes from the new instance."
+        Dismount-EBSVolumes -Instance $NewInstance -Wait -Delete -Force -Timeout $Timeout -IncludeRootVolume @AwsUtilitiesSplat | Out-Null
+
+        # Attach source EBS Volumes to the new instance        
+
+        Write-Progress -Activity $Activity -Status "Attaching source volumes to new instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        foreach ($Item in $VolumesToAdd)
+        {
+            Write-Verbose -Message "Adding volume $($Item.VolumeId) to device $($Item.Device)."
+            Add-EC2Volume -InstanceId $NewInstance.InstanceId -Device $Item.Device -VolumeId $Item.VolumeId -Force @Splat | Out-Null         
+        }
+
+        Write-Verbose -Message "Waiting for all EBS volumes to finish attaching."
+        Invoke-EBSVolumeAttachmentWait -VolumeId ($VolumesToAdd | Select-Object -ExpandProperty ($VolumesToAdd | Get-Member -MemberType NoteProperty -Name VolumeId)[0].Name) -Timeout $Timeout @AwsUtilitiesSplat
+
+        # Remove existing Network Interface(s) from the new instance
+        
+        Write-Progress -Activity $Activity -Status "Removing network interfaces from the new instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        Write-Verbose -Message "Removing Network Interfaces from the new instance."
+        Dismount-EC2InstanceNetworkInterfaces -Instance $NewInstance -Wait -Delete -Force -Timeout $Timeout @AwsUtilitiesSplat | Out-Null
+
+        # Attach source network interfaces to the new instance
+
+        Write-Progress -Activity $Activity -Status "Attaching source network interfaces to the new instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        foreach ($Item in $InterfacesToAdd)
+        {
+            Write-Verbose -Message "Adding interface $($Item.NetworkInterfaceId) to device index $($Item.DeviceIndex)."
+            Add-EC2NetworkInterface -DeviceIndex $Item.DeviceIndex -InstanceId $NewInstance.InstanceId -NetworkInterfaceId $Item.NetworkInterfaceId -Force @Splat | Out-Null
+        }
+
+        Write-Verbose -Message "Waiting for all network interfaces to finish attaching."
+        Invoke-EC2NetworkInterfaceAttachmentWait -NetworkInterfaceId ($InterfacesToAdd | Select-Object -ExpandProperty ($InterfacesToAdd | Get-Member -MemberType NoteProperty -Name NetworkInterfaceId)[0].Name) -Timeout $Timeout @AwsUtilitiesSplat       
+                    
+		# Update again after all old volumes have been removed and new volumes have been attached
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
+
+        Write-Progress -Activity $Activity -Status "Updating eth0 on the new instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+        $CurrentStep++
+
+        # Get the new instance's eth0 device
+        [Amazon.EC2.Model.InstanceNetworkInterface]$RootNetDevice = $NewInstance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -eq 0} | Select-Object -First 1
+
+        # Get the source instance's eth0 device
+        [Amazon.EC2.Model.InstanceNetworkInterface]$SourceRootInterface = $Instance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -eq 0} | Select-Object -First 1
+
+		[System.Collections.Hashtable]$InterfaceSplat = @{}
+
+        # This is the only attribute we can't specify when creating an ENI during EC2 creation
+		if ($SourceRootInterface.SourceDestCheck -ne $null)
+		{
+			$InterfaceSplat.Add("SourceDestCheck", $SourceRootInterface.SourceDestCheck)
+		}
+
+		if ($InterfaceSplat.Count -gt 0)
+		{
+            Write-Verbose -Message "Updating primary network interface attributes."
+
+            foreach ($Item in $InterfaceSplat.GetEnumerator())
+            {
+                $TempSplat = @{}
+                $TempSplat.Add($Item.Key, $Item.Value)
+                Edit-EC2NetworkInterfaceAttribute -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId `
+											@TempSplat `
+											@Splat | Out-Null
+            }
+		}
+
+		# If the source machine had multiple IPs on the root ENI, add those IPs back
+		if ($SourceRootInterface.PrivateIpAddresses.Count -gt 1)
+		{
+			Write-Verbose -Message "Adding secondary IP addresses to root network interface."
+			Register-EC2PrivateIpAddress -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId -PrivateIpAddress ($SourceRootInterface.PrivateIpAddresses | Where-Object {$_.Primary -eq $false} | Select-Object -ExpandProperty PrivateIpAddress) @Splat | Out-Null
+		}
+					
+		# Update again after new interfaces and IPs have been added
+		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
+
+        ### NOW THAT INTERFACES AND PRIVATE IPs HAVE BEEN MOVED, ASSOCIATE EIPs
+
+        # EIPs was set earlier before the new instance was launched
+        if ($EIPs -ne $null -and $EIPs.Count -gt 0)
+        {
+            Write-Progress -Activity $Activity -Status "Updating EIPs on the new instance" -PercentComplete (($CurrentStep / $TotalSteps) * 100)
+            $CurrentStep++
+
+            foreach ($EIP in $EIPs)
+            {
+                $SourcePrivateIP = $EIP.PrivateIpAddress
+
+                Write-Verbose -Message "Removing EIP $($EIP.AssociationId) from $($Instance.InstanceId)."
+                Unregister-EC2Address -AssociationId $EIP.AssociationId -Force @Splat
+
+                [System.Diagnostics.Stopwatch]$SW = [System.Diagnostics.Stopwatch]::StartNew()
+
+                while ($SW.Elapsed.TotalSeconds -le $Timeout)
+                {
+                    $EIP = Get-EC2Address -AllocationId $EIP.AllocationId @Splat
+
+                    if ([System.String]::IsNullOrEmpty($EIP.AssociationId))
+                    {
+                        Write-Verbose -Message "Registering EIP $($EIP.AllocationId) with $($NewInstance.InstanceId)."
+
+                        [System.Collections.Hashtable]$RegSplat = @{}
+
+                        # This will register the EIP on eth0 for the new instance using the same private IP
+                        if ($EIP.PrivateIpAddress -eq $Instance.PrivateIpAddress)
+                        {
+                            $RegSplat.Add("PrivateIpAddress", $NewInstance.PrivateIpAddress)
+                        }
+                        else
+                        {
+                            $RegSplat.Add("PrivateIpAddress", $SourcePrivateIP)
+                        }
+
+                        Register-EC2Address -AllocationId $EIP.AllocationId -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId @RegSplat @Splat | Out-Null
+
+                        [System.Diagnostics.Stopwatch]$SW2 = [System.Diagnostics.Stopwatch]::StartNew()
+
+                        while ($SW2.Elapsed.TotalSeconds -le $Timeout)
+                        {
+                            $EIP = Get-EC2Address -AllocationId $EIP.AllocationId @Splat
+
+                            if ([System.String]::IsNullOrEmpty($EIP.AssociationId))
+                            {
+                                Write-Verbose -Message "Waiting EIP to associate to new instance."
+                                Start-Sleep -Seconds 5
+                                $Counter += 5
+                            }
+                            else
+                            {
+                                break
+                            }
+                        }
+
+                        $SW2.Stop()
+
+                        if ($SW2.Elapsed.TotalSeconds -gt $Timeout)
+                        {
+                            throw "Timeout waiting for EIP $($EIP.AllocationId) to register to $($NewInstance.InstanceId)."
+                        }
+
+                        break
+                    }
+                    else
+                    {
+                        Write-Verbose -Message "Waiting for EIP to become available"
+                        Start-Sleep -Seconds 5
+                    }
+                }
+
+                if ($SW.Elapsed.TotalSeconds -gt $Timeout)
+                {
+                    throw "Timeout waiting for EIP $($EIP.AllocationId) to deregister from $($Instance.InstanceId)."
+                }
+            }
+        }
+
+
+		Write-Verbose -Message "Starting new instance."
+
+		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Force @AwsUtilitiesSplat 
+
+        Write-Progress -Activity $Activity -Completed
+
+        if ($PassThru)
+        {
+            $NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
+            Write-Output -InputObject $NewInstance
+        }
+	}
+
+	End {
+	}
+}
 
 #endregion
 
@@ -1282,7 +3058,6 @@ Function Get-AWSAccountId {
 
 		.PARAMETER ProfileName
 			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
 
         .EXAMPLE
 			$Id = Get-AWSAccountId
@@ -3267,6 +5042,614 @@ Function Mount-EBSVolumes {
 
 	End {
 	}
+}
+
+Function Dismount-EBSVolumes {
+	<#
+		.SYNOPSIS
+			Dismounts either specific or all EBS volumes from a single EC2 instance.
+
+		.DESCRIPTION
+			The cmdlet dismounts volumes from an EC2 instance. If you specify specific volume Ids, just these will be dismounted from the instance, otherwise all volumes will attempt to be dismounted. 
+
+			If the instance is not stopped (i.e. running or stopping), and you try to remove the root volume, this cmdlet will fail. You may optionally indicate that you want to stop the instance before attempting to dismount the volumes.
+			
+		.PARAMETER InstanceId
+			The Id of the instance to dismount volumes from. It should ideally be stopped for the best results. 
+
+		.PARAMETER Instance
+			The instance object to dismount volumes from. It should ideally be stopped for the best results.
+
+		.PARAMETER VolumeId
+			The Ids of the volumes to dismount from the specified instance. If this parameter is not specified, all volumes, except the root volume, are dismounted.
+
+		.PARAMETER IncludeRootVolume
+			When this option is specified, the root instance volume is included with all the volumes to detach from the specified instance. The instance must be stopped, or you must specify the StopInstance parameter for the cmdlet to succeed.
+
+			The VolumeId parameter is not available if this is specified, this adds the root volume to the list of all other volumes on the instance, by default the root volume is not included when the VolumeId parameter is not specified.
+			
+		.PARAMETER StopInstance
+			If the instance is not already stopped, this initiates a Stop and waits for the instance to enter the stopped state.
+
+		.PARAMETER Wait
+			This will wait for the volumes to finish being dismounted and enter the available state.
+
+		.PARAMETER Delete
+			The volumes will be deleted after they are dismounted. If you specify this parameter, the Wait parameter is automatically specified.
+
+		.PARAMETER ForceDismount
+			The volumes with be force dismounted, this could cause data loss or corruption.
+
+		.PARAMETER Timeout
+			The amount of time to wait in seconds for the operation to complete before it is considered unsuccessful. Defaults to 600.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$Instance = Get-EC2Instance -InstanceId i-09740780dc39bde98 | Select-Object -ExpandProperty Instances -First 1
+			Dismount-EBSVolumes -Instance $Instance -StopInstance -IncludeRootVolume -Wait
+
+			The specified instance will be stopped, then all of its volumes, including the root volume will be dismounted. The cmdlet waits for the volumes to enter the available state indicating the dismount operation succeeded.
+
+		.EXAMPLE
+			$Instance = Get-EC2Instance -InstanceId i-09740780dc39bde98 | Select-Object -ExpandProperty Instances -First 1
+			Dismount-EBSVolumes -InstanceId $Instance.InstanceId -VolumeId @("vol-0aa65525bf363acfe") -Wait
+
+			The specified volume is dismounted from the indicated instance. In this case, the specified volume is not the root volume and can be dismounted while the instance is still running. The cmdlet waits for the volume to become available before returning.
+
+		.EXAMPLE
+			$Instance = Get-EC2Instance -InstanceId i-09740780dc39bde98 | Select-Object -ExpandProperty Instances -First 1
+			Dismount-EBSVolumes -Instance $Instance -StopInstance -IncludeRootVolume -Delete
+
+			All volumes, including the root volume are dismounted from the instance after it is stopped. Once the volumes enter an available state, they are deleted. The cmdlet does not wait for the delete operation to complete.
+
+		.EXAMPLE
+			$Instance = Get-EC2Instance -InstanceId i-09740780dc39bde98 | Select-Object -ExpandProperty Instances -First 1
+			Dismount-EBSVolumes -Instance $Instance -Wait
+
+			All volumes except the root volume are dismounted from the running instance. The cmdlet waits for the volumes to enter the available state.
+
+		.INPUTS
+			None or Amazon.EC2.Model.Instance
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject[]
+
+			The output contains the VolumeId and the Device the volume was attached to on the instance. For example:
+
+			@(
+				[PSCustomObject]@{ "VolumeId" = "vol-0aa65525bf363acfe"; "Device" = "/dev/xvda" },
+				[PSCustomObject]@{ "VolumeId" = "vol-03eaea54d02ec33dc"; "Device" = "/dev/sda1" }
+			)
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/30/2019
+	#>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = [System.Management.Automation.ConfirmImpact]::Medium)]
+	[OutputType([PSCustomObject[]])]
+    Param(
+        [Parameter(Mandatory = $true, ParameterSetName = "InstanceIdWithVolumes")]
+		[Parameter(Mandatory = $true, ParameterSetName = "InstanceIdNoVolumes")]
+        [ValidateNotNullOrEmpty()]
+        [System.String]$InstanceId,
+
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0, ParameterSetName = "InstanceWithVolumes")]
+		[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0, ParameterSetName = "InstanceNoVolumes")]
+        [ValidateNotNull()]
+        [Amazon.EC2.Model.Instance]$Instance,
+
+        [Parameter(ParameterSetName = "InstanceIdWithVolumes", Mandatory = $true)]
+		[Parameter(ParameterSetName = "InstanceWithVolumes", Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [System.String[]]$VolumeId = @(),
+
+		[Parameter(ParameterSetName = "InstanceIdNoVolumes")]
+		[Parameter(ParameterSetName = "InstanceNoVolumes")]
+		[Switch]$IncludeRootVolume,
+
+		[Parameter()]
+		[Switch]$StopInstance,
+
+        [Parameter()]
+        [Switch]$Wait,
+
+		[Parameter()]
+		[Switch]$Delete,
+
+		[Parameter()]
+		[Switch]$Force,
+
+		[Parameter()]
+		[Switch]$ForceDismount,
+
+        [Parameter()]
+        [ValidateRange(1, [System.Int32]::MaxValue)]
+        [System.Int32]$Timeout = 600,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+    )
+
+    Begin {
+		[System.Boolean]$YesToAll = $false
+		[System.Boolean]$NoToAll = $false
+    }
+
+    Process {
+        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+
+        [System.Collections.Generic.Queue[Amazon.EC2.Model.Volume]]$VolumesToDetach = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.Volume]
+		[System.Collections.Generic.Dictionary[System.String, System.String]]$TrackedVolumes = New-Object -TypeName "System.Collections.Generic.Dictionary[System.String, System.String]"
+        [PSCustomObject[]]$DetachedVolumes = @()
+
+        if ($PSCmdlet.ParameterSetName -like "InstanceId*")
+        {
+            $Instance = Get-EC2InstanceByNameOrId -InstanceId $InstanceId @AwsUtilitiesSplat
+
+            if ($Instance -eq $null)
+            {
+                throw "Could not find an instance with id $InstanceId."
+            }
+        }
+
+		# The instance is terminated or in the process of termination
+        if ($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Terminated -or $Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::ShuttingDown)
+        {
+            throw "This cmdlet cannot be used on an instance that is terminating or terminated."
+        }
+
+		# This will make sure the block device mappings are populated for a pending instance before tracking the volumes
+		if($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Pending -and $Instance.BlockDeviceMappings -eq $null -or $Instance.BlockDeviceMappings.Count -eq 0)
+		{
+			Write-Verbose -Message "Waiting for instance to populate block device mappings during pending state."
+			Start-Sleep -Seconds 5
+            $Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+		}
+
+		[Amazon.EC2.Model.EbsInstanceBlockDevice[]]$EbsVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs
+		[Amazon.EC2.Model.Volume[]]$SourceVolumes = @()
+
+		# Check to see if the user passed Volume Ids, and if they didn't make sure the instance has actual block device mappings
+        # It's possible the user passes in a stopped instance that already has all block devices removed
+        if ($VolumeId -eq $null -or $VolumeId.Count -eq 0 -and $Instance.BlockDeviceMappings -ne $null -and $Instance.BlockDeviceMappings.Count -gt 0)
+        {
+			$SourceVolumes = $Instance.BlockDeviceMappings | Select-Object -ExpandProperty Ebs | ForEach-Object {
+				Write-Output -InputObject (Get-EC2Volume -VolumeId $_.VolumeId @Splat)
+			}
+			$VolumeId = $EbsVolumes | Select-Object -ExpandProperty VolumeId
+
+			if (-not $IncludeRootVolume)
+			{	
+				$SourceVolumes = $SourceVolumes | Where-Object { $_.Attachments[0].Device -ne $Instance.RootDeviceName}
+
+				if ($SourceVolumes -ne $null -and $SourceVolumes.Count -gt 0)
+				{
+					$VolumeId =  $SourceVolumes | Select-Object -ExpandProperty VolumeId
+				}
+			}
+        }
+		else
+		{
+			# Make sure the user provided volume Ids are attached to the specified instance			
+			[System.String[]]$AttachedVolumeIds = $EbsVolumes | Select-Object -ExpandProperty VolumeId
+			
+			foreach ($Volume in $VolumeId)
+			{
+				if ($Volume -inotin $AttachedVolumeIds)	
+				{
+					throw "A provided volume, $Volume, is not one of the attached volumes for instance $($Instance.InstanceId): $([System.String]::Join(",", $AttachedVolumeIds))."
+				}
+			}
+
+			$SourceVolumes = $VolumeId | ForEach-Object {
+				Write-Output -InputObject (Get-EC2Volume -VolumeId $_ @Splat)
+			}
+		}
+
+		foreach ($Volume in $SourceVolumes)
+		{ 
+			$TrackedVolumes.Add($Volume.VolumeId, $Volume.Attachments[0].Device)
+		} 
+
+		# Cannot remove volumes from a pending instance, make sure the instance leaves pending
+		while ($Instance.State.Name -eq [Amazon.EC2.InstanceStateName]::Pending)
+		{
+			Write-Verbose -Message "Waiting for instance to reaching a running state."
+			Start-Sleep -Seconds 5
+            $Instance = Get-EC2InstanceByNameOrId -InstanceId $Instance.InstanceId @AwsUtilitiesSplat
+		}
+
+		# If the instance isn't stopped, see if the user specified to stop it, or prompt them to confirm
+		if ($Instance.State.Name -ne [Amazon.EC2.InstanceStateName]::Stopped )
+		{
+			if ($StopInstance)
+			{
+                $StopSplat = @{}
+
+                if ($Force)
+                {
+                    $StopSplat.Add("Force", $true)
+                }
+
+				Set-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait @StopSplat @AwsUtilitiesSplat | Out-Null
+			}
+			else
+			{
+				$RootVolumeId = $Instance.BlockDeviceMappings | Where-Object { $_.DeviceName -eq $Instance.RootDeviceName } | Select-Object -ExpandProperty Ebs | Select-Object -ExpandProperty VolumeId
+				
+				if ($VolumeId -contains $RootVolumeId)
+				{
+					throw "You are trying to remove the root volume $RootVolumeId from a non-stopped instance. This will never succeed."
+				}
+
+				Write-Warning -Message "The EC2 instance $($Instance.InstanceId) is not stopped, it is currently $($Instance.State)."
+
+				$Query = "Are you sure you want to dismount volumes from an instance that is not stopped? This could cause data corruption or fail to detach the volume(s)."
+				$Caption = "Dismount Volumes"
+
+				if (-not $Force -or -not $PSCmdlet.ShouldContinue($Query, $Caption))
+				{
+					Exit
+				}
+			}
+		}
+
+		if ($SourceVolumes -ne $null -and $SourceVolumes.Count -gt 0)
+		{			
+			$VerboseDescription = "Dismount volumes $([System.String]::Join(",", $VolumeId)) from instance $($Instance.InstanceId)"
+			$VerboseWarning = "Are you sure you want dismount volumes $([System.String]::Join(",", $VolumeId)) from $($Instance.InstanceId)?"
+			$Caption = "Dismount Volumes"
+
+			if ($PSCmdlet.ShouldProcess($VerboseDescription, $VerboseWarning, $Caption))
+			{
+				[System.Collections.Hashtable]$VolumeSplat = @{}
+
+				if ($ForceDismount)
+				{
+					$VolumeSplat.Add("ForceDismount", $true)
+				}
+
+				foreach ($Volume in $SourceVolumes)
+				{
+					$Query = "Dismount volume $($Volume.VolumeId) from instance $($Instance.InstanceId)?"
+					$Caption = "Dismount Volume"
+
+					if ($Force -or $PSCmdlet.ShouldContinue($Query, $Caption, [ref]$YesToAll, [ref]$NoToAll))
+					{
+						if ($Volume.Attachments -ne $null -and $Volume.Attachments.Count -gt 0)
+						{
+							$VolumesToDetach.Enqueue($Volume)
+
+							Write-Verbose -Message "Dismounting volume $($Volume.VolumeId) at device $($Volume.Attachments[0].Device) from the instance."				
+							Dismount-EC2Volume -VolumeId $Volume.VolumeId -InstanceId $Instance.InstanceId @Splat @VolumeSplat | Out-Null		
+						}
+						else
+                        {
+                            Write-Verbose -Message "It appears that volume $Id became dismounted during the cmdlet operation, the DescribeVolumes API did not return Attachment data, its device name may not be tracked."
+                        }
+					}
+				}
+
+				$YesToAll = $false
+				$NoToAll = $false
+
+				if ($Wait -or $Delete)
+				{
+					[System.Diagnostics.Stopwatch]$SW = [System.Diagnostics.Stopwatch]::StartNew()
+
+					while ($VolumesToDetach.Count -gt 0 -and $SW.Elapsed.TotalSeconds -le $Timeout)
+					{
+						[Amazon.EC2.Model.Volume]$Volume = $VolumesToDetach.Dequeue()
+
+						switch ($Volume.State)
+						{
+							([Amazon.EC2.VolumeState]::Available) {
+								Write-Verbose -Message "Successfully detached volume $($Volume.VolumeId) from $($Instance.InstanceId)."     
+                        
+								if ($Delete)
+								{
+									Write-Verbose -Message "Deleting volume $($Volume.VolumeId)"
+
+									$Query = "Permanently delete EBS volume $($Volume.VolumeId)?"
+									$Caption = "Delete Volume"
+
+									if ($Force -or $PSCmdlet.ShouldContinue($Query, $Caption, [ref]$YesToAll, [ref]$NoToAll))
+									{
+										Remove-EC2Volume -VolumeId $Volume.VolumeId -Force @Splat | Out-Null
+									}
+								}
+                                     
+								break
+							}
+							([Amazon.EC2.VolumeState]::InUse) {
+								# Keep waiting
+								$VolumesToDetach.Enqueue($Volume)
+								break
+							}
+							{$_ -in @([Amazon.EC2.VolumeState]::Creating, [Amazon.EC2.VolumeState]::Deleted, [Amazon.EC2.VolumeState]::Deleting, [Amazon.EC2.VolumeState]::Error) } {
+								throw "Invalid state for volume $($Volume.VolumeId): $($Volume.State)."
+							}
+							default {
+								throw "Unknown volume state $($Volume.State) for volume $($Volume.VolumeId)."
+							}
+						}
+
+						# Only update the volume list if all of them are not available
+						if ($VolumesToDetach.Count -gt 0 -and ($VolumesToDetach | Where-Object { $_.Status -ne [Amazon.EC2.VolumeState]::Available}).Count -eq $VolumesToDetach.Count)
+						{
+							Write-Verbose -Message "Waiting for volumes to finish detaching."
+							Start-Sleep -Seconds 10
+
+							$Arr = $VolumesToDetach.ToArray()
+
+							$VolumesToDetach = New-Object -TypeName System.Collections.Generic.Queue[Amazon.EC2.Model.Volume]
+
+							for ($i = 0; $i -lt $Arr.Length; $i++)
+							{
+								$VolumesToDetach.Enqueue((Get-EC2Volume -VolumeId $Volume.VolumeId @Splat))
+							}
+						}
+					}
+
+					$SW.Stop()
+
+					if ($SW.Elapsed.TotalSeconds -gt $Timeout -and $VolumesToDetach.Count -gt 0)
+					{
+						throw "Timeout occured waiting for volumes to finish being dismounted. Did not finish dismounting volumes $([System.String]::Join(",", ($VolumesToDetach | Select-Object -ExpandProperty VolumeId)))."
+					}
+				}
+			}
+
+			foreach ($Key in $TrackedVolumes.Keys)
+            {
+				$DetachedVolumes += [PSCustomObject]@{"VolumeId" = $Key; "Device" = $TrackedVolumes[$Key]}
+            }
+
+			Write-Output -InputObject $DetachedVolumes
+		}
+		else 
+		{
+			Write-Verbose -Message "No volumes to dismount."
+			Write-Output -InputObject $DetachedVolumes
+		}
+    }
+
+    End {
+    }
+}
+
+Function Invoke-EBSVolumeAttachmentWait {
+    <#
+        .SYNOPSIS 
+            Waits for a specified set of volumes to reach an attached state.
+
+        .DESCRIPTION
+            The cmdlet waits for a specified set of volumes to be in-use and attached to an EC2 instance.
+
+        .PARAMETER Volume
+            The volume(s) to wait to become attached.
+
+        .PARAMETER VolumeId
+            The volume Id(s) to wait to become attached.
+
+        .PARAMETER Timeout
+            The amount of time to wait in seconds before the cmdlet fails. Defaults to 600.
+
+        .PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+
+        .EXAMPLE
+            Invoke-EBSVolumeAttachmentWait -VolumeId @("vol-0f8d10b5ca8259a17", "vol-03fa72bf6ed7c2ed3")
+
+            This waits for the two specified volumes to be in use and attached to an instance.
+
+        .INPUTS
+            Amazon.EC2.Model.Volume[]
+
+        .OUTPUTS
+            None
+
+        .NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/30/2019
+    #>    
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ParameterSetName = "Volume")]
+        [ValidateNotNullOrEmpty()]
+        [Amazon.EC2.Model.Volume[]]$Volume,
+
+        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = "VolumeId")]
+        [ValidateNotNullOrEmpty()]
+        [System.String[]]$VolumeId,
+
+        [Parameter()]
+        [ValidateRange(1, [System.Int32]::MaxValue)]
+        [System.Int32]$Timeout = 600,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[Amazon.RegionEndpoint]$Region,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+    )
+
+    Begin {
+		if ($PSCmdlet.ParameterSetName -eq "Volume")
+        {
+            $VolumeId = $Volume | Select-Object -ExpandProperty VolumeId
+        }
+    }
+
+    Process {
+        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
+        
+        # Use "," trick to preven the array from being unrolled
+        [System.Collections.Generic.Queue[System.String]]$VolumeQueue = New-Object -TypeName System.Collections.Generic.Queue[System.String] -ArgumentList (,$VolumeId)
+
+        [System.Diagnostics.Stopwatch]$SW = [System.Diagnostics.Stopwatch]::StartNew()
+
+        # Track the source volumes that are now attached to the new instance to make sure they finish attaching
+        while ($VolumeQueue.Count -gt 0 -and $SW.Elapsed.TotalSeconds -le $Timeout)
+        {
+            [System.String]$Id = $VolumeQueue.Dequeue()
+            [Amazon.EC2.Model.Volume]$Volume = Get-EC2Volume -VolumeId $Id @Splat
+
+            switch ($Volume.State)
+            {
+                ([Amazon.EC2.VolumeState]::InUse) {
+                    
+                    switch ($Volume.Attachments[0].State)
+                    {
+                        ([Amazon.EC2.AttachmentStatus]::Attached) {
+                            Write-Verbose -Message "Volume $($Volume.VolumeId) is attached to $($Volume.Attachments[0].InstanceId)."
+                            break
+                        }
+                        ([Amazon.EC2.AttachmentStatus]::Attaching) {
+                            $VolumeQueue.Enqueue($Id)
+                            break
+                        }
+                        {$_ -in @([Amazon.EC2.AttachmentStatus]::Detached, [Amazon.EC2.AttachmentStatus]::Detaching)} {
+                            throw "The volume $($Volume.VolumeId) is in attachment state $($Volume.Attachments[0].State), which is not attaching or attached."
+                        }
+                        default {
+                            throw "Unknown attachment state $($Volume.Attachments[0].State) for volume $($Volume.VolumeId)."
+                        }
+                    }
+
+                    break
+                }
+                ([Amazon.EC2.VolumeState]::Available) {                  
+                    $VolumeQueue.Enqueue($Id)
+                    break
+                }
+                {$_ -in @([Amazon.EC2.VolumeState]::Deleted, [Amazon.EC2.VolumeState]::Deleting, [Amazon.EC2.VolumeState]::Error, [Amazon.EC2.VolumeState]::Creating) } {
+                    throw "The volume $($Volume.VolumeId) is not in an expected state to be waited on for attachment."
+                }
+                default {
+                    throw "Unknown volume state $($Volume.State) for volume $($Volume.VolumeId)."
+                }
+            }
+
+            if (($DevcesToAttach | Where-Object { $_.Attachments -eq $null -or 
+                $_.Attachments.Count -eq 0 -or
+                $_.Attachments[0].State -ne [Amazon.EC2.AttachmentStatus]::Attached}).Count -gt 0)
+            {
+                Write-Verbose -Message "Waiting for volumes to finish attaching."
+                Start-Sleep -Seconds 10
+            }
+        }
+
+        $SW.Stop()
+
+        if ($SW.Elapsed.TotalSeconds -gt $Timeout)
+        {
+            throw "Timeout waiting for all volumes to finish attaching."
+        }
+    }
+
+    End {
+    }
 }
 
 #endregion
@@ -6674,476 +9057,6 @@ Function Get-AWSVpcPeeringSummary {
 		Write-Progress -Activity "Processing Regions" -Completed
 
 		Write-Output -InputObject $Results
-	}
-
-	End {
-
-	}
-}
-
-
-Function Update-EC2InstanceAmiId {
-	<#
-		.SYNOPSIS
-			Changes the AMI id of a currently launched instance.
-
-		.DESCRIPTION
-			The cmdlet stops the source EC2 instance, detaches its EBS volumes and ENIs (except eth0), terminates the instance, launches a new EC2 instance with the specified AMI id and any configuration items like sriovsupport enabled, stops it, deletes its EBS volumes, attaches the source volumes and ENIs, and restarts the new EC2 instance.
-
-		.PARAMETER InstanceId
-			The id of the instance to get.
-
-		.PARAMETER InstanceName
-			The value of the name tag of the instance to get. The name tags in the account being accessed must be unique for this to work.
-
-		.PARAMETER NewAmiId
-			The new AMI id to launch the EC2 instance with.
-
-		.PARAMETER Timeout
-			The amount of time in seconds to wait for each action to succeed. This defaults to 600.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			Update-EC2InstanceAmiId -InstanceId i-123456789012 -NewAmiId "ami-123456789012"
-
-			Changes the AMI id being used for the specified instance
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			None
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 6/30/2017
-	#>
-	[CmdletBinding()]
-	Param(
-		[Parameter(Mandatory = $true)]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$NewAmiId,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "Name")]
-		[Alias("Name")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$InstanceName,
-
-		[Parameter(Mandatory = $true, ParameterSetName = "Id")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$InstanceId,
-
-		[Parameter()]
-		[System.Int32]$Timeout = 600,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.RegionEndpoint]$Region,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileName = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$AccessKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SecretKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SessionToken = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.Runtime.AWSCredentials]$Credential,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-	Begin {
-	}
-
-	Process {
-		[System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-		[System.Collections.Hashtable]$AwsUtilitiesSplat = New-AWSUtilitiesSplat -AWSSplat $Splat
-
-		$InstanceSplat = @{}
-
-		if ($PSCmdlet.ParameterSetName -eq "Id")
-		{
-			Write-Verbose -Message "Using instance id $InstanceId."
-			$InstanceSplat.Add("InstanceId", $InstanceId)
-		}
-		else
-		{
-			Write-Verbose -Message "Using instance name $InstanceName."
-			$InstanceSplat.Add("InstanceName", $InstanceName)
-		}
-
-		# Get the source EC2 instance
-		[Amazon.EC2.Model.Instance]$Instance = Get-EC2InstanceByNameOrId @InstanceSplat @AwsUtilitiesSplat
-	
-		# Stop the source EC2 instance
-		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
-
-		[PSCustomObject[]]$BlockDevices = @()
-
-		# Detach all EBS volumes from the source machine
-		
-		foreach ($BlockDevice in $Instance.BlockDeviceMappings)
-		{
-			$BlockDevices += [PSCustomObject]@{Volume = Get-EC2Volume -VolumeId $BlockDevice.Ebs.VolumeId @Splat; DeviceName = $BlockDevice.DeviceName}
-
-			Dismount-EC2Volume -InstanceId $Instance.InstanceId -VolumeId $BlockDevice.Ebs.VolumeId @Splat | Out-Null
-		}
-
-		while (($BlockDevices | Select-Object -ExpandProperty Volume | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Count -ne $BlockDevices.Count)
-		{
-			Write-Verbose -Message "Waiting for volumes to detach."
-
-			for ($i = 0; $i -lt $BlockDevices.Length; $i++)
-			{
-				$BlockDevices[$i].Volume = Get-EC2Volume -VolumeId $BlockDevices[$i].Volume.VolumeId @Splat
-			}
-
-			Start-Sleep -Seconds 5
-		}
-
-		# Detach all the additional network interfaces
-
-		[PSCustomObject[]]$Interfaces = @()
-
-		foreach ($Interface in ($Instance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -ne 0}))
-		{
-			$Interfaces += [PSCustomObject]@{ DeviceIndex = $Interface.Attachment.DeviceIndex; Interface = $Interface}
-
-			Write-Verbose -Message "Dismounting interface $($Interface.NetworkInterfaceId) at index $($Interface.Attachment.DeviceIndex) from the source instance."				
-			Dismount-EC2NetworkInterface -AttachmentId $Interface.Attachment.AttachmentId @Splat | Out-Null
-		}
-
-		if ($Interfaces.Count -gt 0)
-		{
-			# While the count of interfaces whose status is available is not equal to the count of interfaces
-			# keep waiting until they are all available
-			# Use a minus 1 on Interfaces count since we are not detaching the interface at index 0
-			while ((($Interfaces | Select-Object -ExpandProperty Interface | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::Available }).Count -ne $Interfaces.Count - 1)
-			{
-				Write-Verbose -Message "Waiting for all network interfaces to detach."
-
-				# Start at 1 since index 0 isn't being detached
-				for ($i = 1; $i -lt $Interfaces.Length; $i++)
-				{
-					$Interfaces[$i].Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Interfaces[$i].NetworkInterfaceId @Splat
-				}
-
-				Start-Sleep -Seconds 5
-			}
-		}
-
-		Write-Verbose -Message "Deleting the original instance."
-		Write-Host -Object "Original instance AMI id: $($Instance.ImageId)"
-
-		Set-EC2InstanceState -InstanceId $Instance.InstanceId -State TERMINATE -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
-
-		# Build some optional parameters for New-EC2Instance
-		[System.Collections.Hashtable]$NewInstanceSplat = @{}
-
-		if ($Instance.InstanceLifecycle -ne $null)
-		{
-			$NewInstanceSplat.InstanceLifecycle = $Instance.InstanceLifecycle
-		}
-
-		# Windows instances won't have a kernel id
-		if (-not [System.String]::IsNullOrEmpty($Instance.KernelId))
-		{
-			$NewInstanceSplat.KernelId = $Instance.KernelId
-		}
-
-		# Copy all of the tags from the source insance
-		if ($Instance.Tags.Count -gt 0)
-		{
-			[Amazon.EC2.Model.TagSpecification]$Tags = New-Object -TypeName Amazon.EC2.Model.TagSpecification
-
-			$Tags.ResourceType = [Amazon.EC2.ResourceType]::Instance
-
-			$Tags.Tags = $Instance.Tags
-
-			$NewInstanceSplat.TagSpecification = $Tags
-		}
-
-		# Copy placement info for affinity, placement group, and host id
-		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.Affinity))
-		{
-			$NewInstanceSplat.Affinity = $Instance.Placement.Affinity
-		}
-
-		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.GroupName))
-		{
-			$NewInstanceSplat.PlacementGroup = $Instance.Placement.GroupName
-		}
-
-		if (-not [System.String]::IsNullOrEmpty($Instance.Placement.HostId))
-		{
-			$NewInstanceSplat.HostId = $Instance.Placement.HostId
-		}
-
-		# This specifies if detailed monitoring is enabled
-
-		if ($Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Enabled -or $Instance.Monitoring.State -eq [Amazon.EC2.MonitoringState]::Pending)
-		{
-			$NewInstanceSplat.Monitoring_Enabled = $true
-		}
-
-		if ($Instance.EbsOptimized -eq $true)
-		{
-			$NewInstanceSplat.EbsOptimized = $true
-		}
-		
-		Write-Verbose -Message @"
-Launching new instance:
-	Type:              $($Instance.InstanceType)
-	Subnet:            $($Instance.SubnetId)
-	Security Groups:   $([System.String]::Join(",", ($Instance.SecurityGroups | Select-Object -ExpandProperty GroupId)))
-	AZ:                $($Instance.Placement.AvailabilityZone)
-	IAM Profile:       $($Instance.IamInstanceProfile.Arn)
-	Private IP:        $($Instance.PrivateIPAddress)
-	Tenancy:           $($Instance.Placement.Tenancy)
-"@
-
-		[Amazon.EC2.Model.Instance]$NewInstance = $null
-
-		$Temp = New-EC2Instance -ImageId $NewAmiId `
-						-AssociatePublicIp (-not [System.String]::IsNullOrEmpty($Instance.PublicIpAddress)) `
-						-KeyName $Instance.KeyName `
-						-SecurityGroupId ($Instance.SecurityGroups | Select-Object -ExpandProperty GroupId) `
-						-SubnetId $Instance.SubnetId `
-						-InstanceType $Instance.InstanceType `
-						-AvailabilityZone $Instance.Placement.AvailabilityZone `
-						-Tenancy $Instance.Placement.Tenancy `
-						-InstanceProfile_Arn $Instance.IamInstanceProfile.Arn `
-						-PrivateIpAddress $Instance.PrivateIpAddress `
-						@NewInstanceSplat @Splat
-
-		if ($Temp -eq $null)
-		{
-			throw "Could not create the new instance."
-		}
-
-		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $Temp.Instances[0].InstanceId @AwsUtilitiesSplat
-
-		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
-
-		Write-Verbose -Message "Stopping new instance."
-
-		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State STOP -Wait -Timeout $Timeout -Force @AwsUtilitiesSplat
-
-		if (-not [System.String]::IsNullOrEmpty($Instance.SriovNetSupport))
-		{
-			Write-Verbose -Message "Enabling SrIovNetSupport"
-			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -SriovNetSupport $Instance.SriovNetSupport @Splat | Out-Null
-		}
-
-		if ($Instance.EnaSupport -eq $true)
-		{
-			Write-Verbose -Message "Enabling ENA"
-			Edit-EC2InstanceAttribute -InstanceId $NewInstance.InstanceId -EnaSupport $true @Splat | Out-Null
-		}
-
-		# Update the interface at index 0 because we can't specify New-EC2Instance with both a set of security groups for the instance
-		# in addition to security groups for the ENI as well as a specific subnet for the instance and ENI
-
-		[Amazon.EC2.Model.InstanceNetworkInterface]$RootNetDevice = $NewInstance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -eq 0} | Select-Object -First 1
-		[Amazon.EC2.Model.InstanceNetworkInterface]$SourceRootInterface = $Interfaces | Where-Object {$_.DeviceIndex -eq 0} | Select-Object -First 1 -ExpandProperty Interface
-
-		[System.Collections.Hashtable]$InterfaceSplat = @{}
-
-		if ($SourceRootInterface.SourceDestCheck -ne $null)
-		{
-			$InterfaceSplat.SourceDestCheck = $SourceRootInterface.SourceDestCheck
-		}
-
-		if (-not [System.String]::IsNullOrEmpty($SourceRootInterface.Description))
-		{
-			$InterfaceSplat.Description = $SourceRootInterface.Description
-		}
-
-		if ($SourceRootInterface.Groups.Count -gt 0)
-		{
-			$InterfaceSplat.Groups = ($SourceRootInterface.Groups | Select-Object -ExpandProperty GroupId) 
-		}
-
-		if ($InterfaceSplat.Count -gt 0)
-		{
-			Write-Verbose -Message "Updated primary network interface attributes."
-			Edit-EC2NetworkInterfaceAttribute -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId `
-											@InterfaceSplat `
-											@Splat | Out-Null
-		}
-
-		# If the source machine had multiple IPs on the root ENI, add those IPs back
-		if ($SourceRootInterface.PrivateIpAddresses.Count -gt 1)
-		{
-			Write-Verbose -Message "Adding secondary IP addresses to root network interface."
-			Register-EC2PrivateIpAddress -NetworkInterfaceId $RootNetDevice.NetworkInterfaceId -PrivateIpAddress ($SourceRootInterface.PrivateIpAddresses | Where-Object {$_.Primary -eq $false} | Select-Object -ExpandProperty PrivateIpAddress) @Splat | Out-Null
-		}
-								
-		[Amazon.EC2.Model.NetworkInterface[]]$InterfacesToDelete = @()
-
-		foreach ($Interface in ($NewInstance.NetworkInterfaces | Where-Object {$_.Attachment.DeviceIndex -ne 0 }))
-		{
-			$InterfacesToDelete += Get-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId @Splat
-			Write-Verbose -Message "Dismounting network interface $($Interface.NetworkInterfaceId) from new instance."
-			Dismount-EC2NetworkInterface -AttachmentId $Interface.Attachment.AttachmentId @Splat | Out-Null
-		}
-
-		if ($InterfacesToDelete.Count -gt 0)
-		{
-			while ((($InterfacesToDelete | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::Available }).Count -ne $InterfacesToDelete.Count)
-			{
-				Write-Verbose -Message "Waiting for all network interfaces to detach."
-
-				for ($i = 0; $i -lt $InterfacesToDelete.Length; $i++)
-				{
-					$InterfacesToDelete[$i] = Get-EC2NetworkInterface -NetworkInterfaceId $InterfacesToDelete[$i].NetworkInterfaceId @Splat
-				}
-
-				Start-Sleep -Seconds 5
-			}
-
-			foreach ($Interface in $InterfacesToDelete)
-			{
-				Write-Verbose -Message "Deleting interface $($Interface.NetworkInterfaceId)."
-				Remove-EC2NetworkInterface -NetworkInterfaceId $Interface.NetworkInterfaceId -Force @Splat | Out-Null
-			}
-		}
-
-		# Update the value we have after all the interfaces have been updated, removed, and/or deleted
-		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
-
-		if ($Interfaces.Count -gt 0)
-		{
-			Write-Verbose -Message "Adding network interfaces to the new instance."
-
-			foreach ($Interface in $Interfaces)
-			{
-				Write-Verbose -Message "Adding $($Interface.Interface.NetworkInterfaceId) at index $($Interface.DeviceIndex)."
-				Add-EC2NetworkInterface -InstanceId $NewInstance.InstanceId -NetworkInterfaceId $Interface.Interface.NetworkInterfaceId -DeviceIndex $Interface.DeviceIndex @Splat | Out-Null
-			}
-
-			while ((($Interfaces | Select-Object -ExpandProperty Interface | Select-Object -ExpandProperty Status) | Where-Object {$_ -eq [Amazon.EC2.NetworkInterfaceStatus]::InUse }).Count -ne $Interfaces.Count)
-			{
-				Write-Verbose -Message "Waiting for all network interfaces to be in use."
-
-				for ($i = 0; $i -lt $Interfaces.Count; $i++)
-				{
-					$Interfaces[$i].Interface = Get-EC2NetworkInterface -NetworkInterfaceId $Interfaces[$i].Interface.NetworkInterfaceId @Splat
-				}
-
-				Start-Sleep -Seconds 5
-			}
-		}
-
-		# Update again after new interfaces have been added
-		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
-
-		Write-Verbose -Message "Removing EBS volumes from the new instance."
-
-		[Amazon.EC2.Model.Volume[]]$VolumesToDelete = @()
-
-		foreach ($BlockDevice in $NewInstance.BlockDeviceMappings)
-		{
-			Write-Verbose -Message "Dismounting device $($BlockDevice.Ebs.VolumeId) at $($BlockDevice.DeviceName)."
-			Dismount-EC2Volume -InstanceId $NewInstance.InstanceId -VolumeId $BlockDevice.Ebs.VolumeId @Splat | Out-Null
-
-			$VolumesToDelete += Get-EC2Volume -VolumeId $BlockDevice.Ebs.VolumeId @Splat
-		}
-
-		if ($VolumesToDelete.Count -gt 0)
-		{
-			while (($VolumesToDelete | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::Available}).Count -ne $VolumesToDelete.Length)
-			{
-				Write-Verbose -Message "Waiting for volumes to become available."
-
-				for ($i = 0; $i -lt $VolumesToDelete.Length; $i++)
-				{
-					$VolumesToDelete[$i] = Get-EC2Volume -VolumeId $VolumesToDelete[$i].VolumeId @Splat
-				}
-
-				Start-Sleep -Seconds 5
-			}
-
-			foreach ($Volume in $VolumesToDelete)
-			{
-				Write-Verbose -Message "Deleting new instance volume $($Volume.VolumeId)." 
-				Remove-EC2Volume -VolumeId $Volume.VolumeId -Force @Splat
-			}
-		}
-
-		# Update again after all volumes have been removed
-		$NewInstance = Get-EC2InstanceByNameOrId -InstanceId $NewInstance.InstanceId @AwsUtilitiesSplat
-
-		Write-Verbose -Message "Adding original EBS volumes to new instance."
-
-		foreach ($BlockDevice in $BlockDevices)
-		{
-			Write-Verbose -Message "Adding $($BlockDevice.Volume.VolumeId) to device $($BlockDevice.DeviceName)."
-			Add-EC2Volume -InstanceId $NewInstance.InstanceId -Device $BlockDevice.DeviceName -VolumeId $BlockDevice.Volume.VolumeId @Splat | Out-Null
-		}
-
-		$Counter = 0
-
-		while (($BlockDevices | Select-Object -ExpandProperty Volume | Where-Object {$_.State -eq [Amazon.EC2.VolumeState]::InUse}).Count -ne $BlockDevices.Count -and $Counter -lt $Timeout)
-		{
-			Write-Verbose -Message "Waiting for volumes to be attached."
-
-			for ($i = 0; $i -lt $BlockDevices.Length; $i++)
-			{
-				$BlockDevices[$i].Volume = Get-EC2Volume -VolumeId $BlockDevices[$i].Volume.VolumeId @Splat
-			}
-
-			Start-Sleep -Seconds 5
-			$Counter += 5
-		}
-
-		if ($Counter -ge $Timeout)
-		{
-			throw "Timout waiting for volumes to be attached to the new instance."
-		}
-
-		Write-Verbose -Message "Starting instance."
-
-		Set-EC2InstanceState -InstanceId $NewInstance.InstanceId -State START -Force @AwsUtilitiesSplat 
 	}
 
 	End {
