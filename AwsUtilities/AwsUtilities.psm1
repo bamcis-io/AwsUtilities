@@ -13,6 +13,157 @@ $script:MaxEC2Tags = 50
 Set-Variable -Name AWSRegions -Value (Get-AWSRegion -IncludeChina -IncludeGovCloud | Select-Object -ExpandProperty Region)
 Set-Variable -Name AWSPublicRegions -Value @(Get-AWSRegion | Select-Object -ExpandProperty Region)
 
+#region Utility Functions
+
+Function Start-NewRunspace {
+    <#
+		.SYNOPSIS
+			The cmdlet executes scriptblocks in a new PowerShell runspace.
+
+		.DESCRIPTION
+			The cmdlet creates a single new PowerShell runspace and each scriptblock is executed in the new runspace. The scriptblocks are executed serially in the order provided via a synchronous call.
+	
+		.PARAMETER ScriptBlock
+			The scriptblock(s) to execute in the new runspace.
+
+		.PARAMETER ArgumentList
+			The arguments to provide to each scriptblock.
+
+		.PARAMETER NamedArguments
+			Named arguments to provide to each scriptblock.
+
+		.PARAMETER RunspacePool
+			If you provide
+
+		.EXAMPLE
+			[ScriptBlock]$SB1 = {
+				Param(
+					[System.Int32]$A,
+					[System.Int32]$B
+				)
+
+				$AB = $A / $B
+				Write-Output ($A / $B)
+			}
+
+			[ScriptBlock]$SB2 = {
+				Param(
+					[System.Int32]$C,
+					[System.Int32]$D
+				)
+
+				Write-Output ($C * $D)
+
+				Write-Output ($AB)
+			}
+
+			Start-NewRunspace -ScriptBlock $SB1, $SB2 -NamedArguments @{ "B" = 4; "A" = 2; "C" = 5; "D" = 5}
+
+			The cmdlet executes 2 script blocks. The output is:
+			0.5
+			25
+			0.5
+
+			The variable $AB defined in the first scriptblock is available in the second scriptblock. The arguments A, B, C, and D are provided as named arguments so each scriptblock gets the intended values.
+
+		.INPUTS
+			System.Management.Automation.ScriptBlock
+
+		.OUTPUTS
+			The output of the cmdlet is dependent on what the scriptblocks output.
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 2/4/2019
+	#>
+	[CmdletBinding()]
+    Param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+        [ValidateNotNullOrEmpty()]
+        [System.Management.Automation.ScriptBlock[]]$ScriptBlock,
+
+        [Parameter(ParameterSetName = "ArgumentList")]
+        [System.Object[]]$ArgumentList,
+
+        [Parameter(ParameterSetName = "NamedArguments")]
+        [System.Collections.Hashtable]$NamedArguments,
+
+		[Parameter()]
+		[ValdiateNotNull()]
+		[System.Management.Automation.Runspaces.RunspacePool]$RunspacePool 
+    )
+
+    Begin {
+		if ($RunspacePool -eq $null -or $RunspacePool.IsDisposed)
+		{
+			[System.Management.Automation.Runspaces.Runspace]$Runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+			$Runspace.Open()
+		}
+		else
+		{
+			if ($RunspacePool.RunspacePoolAvailability -eq [System.Management.Automation.Runspaces.RunspaceAvailability]::None)
+			{
+				$RunspacePool.Open()
+			}
+		}
+    }
+
+    Process{
+        try
+        {
+            foreach ($SB in $ScriptBlock) 
+            {
+                try 
+                {
+                    [System.Management.Automation.PowerShell]$Pipeline = [System.Management.Automation.PowerShell]::Create()
+                    $Pipeline.AddScript($SB) | Out-Null
+                    
+					if ($RunspacePool -ne $null)
+					{
+						$Pipeline.RunspacePool = $RunspacePool
+					}
+					else
+					{					
+						$Pipeline.Runspace = $Runspace
+					}
+
+                    if ($ArgumentList -ne $null -and $ArgumentList.Count -gt 0)
+                    {
+                        $Pipeline.AddParameters($ArgumentList) | Out-Null
+                    }
+
+                    if ($NamedArguments -ne $null -and $NamedArguments.Count -gt 0)
+                    {
+                        foreach ($Item in $NamedArguments.GetEnumerator())
+                        {
+                            $Pipeline.AddParameter($Item.Key, $Item.Value) | Out-Null
+                        }
+                    }
+
+                    Write-Output -InputObject ($Pipeline.Invoke())
+                }
+                finally {
+                    $Pipeline.Dispose()
+                }
+            }
+        }
+        catch [Exception] 
+        {
+            # Do nothing, just make sure we make it to the finally block
+        }
+    }
+
+    End { 
+		if ($Runspace -ne $null)
+		{
+			$Runspace.Close()
+			$Runspace.Dispose()
+		}
+    }
+}
+
+#endregion
+
 #region S3 Functions
 
 Function Get-S3ETagCalculation {
@@ -3603,6 +3754,253 @@ Function Get-AWSIAMRoleSummary {
 	}
 }
 
+Function Invoke-AWSCrossAccountCommand {
+	<#
+		.SYNOPSIS
+			Executes an assume role into another account with the provided credentials and executes a scriptblock.
+
+		.DESCRIPTION
+			This cmdlet executes a Use-STSRole in the account number specified with the supplied credentials. The role specified is assumed, 
+			the default credentials are updated, the scriptblock is run, and the temporary credentials are then removed. The cmdlet effectively
+			lets you run entire scripts in remote account accounts via cross account access.
+
+		.PARAMETER AccountId
+			The 12 digit account id to run the scriptblock in.
+
+		.PARAMETER Role
+			The role name to assume in the remote account.
+
+		.PARAMETER ExternalId
+			The external id provided by the central jump account for this remote account.
+
+		.PARAMETER ScriptBlock
+			The block of script to execute in the remote account.
+
+		.PARAMETER FilePath
+			The path to the script to execute against the remote account.
+
+		.PARAMETER UseVirtualMFA
+			Specifies that an AWS virtual MFA is being used.
+
+		.PARAMETER TokenSerialNumber
+			The serial number of the physical MFA token.
+
+		.PARAMETER TokenCode
+			The current MFA token code, if this is not specified, but either UseVirtualMFA or TokenSerialNumber are specified, you will be prompted
+			to enter the token code.
+
+		.PARAMETER DurationInSeconds
+			The length of time the temporary credentials are good for between 900 and 3600 seconds. This defaults to 3600, which is 1 hour.
+
+		.PARAMETER ArgumentList
+            The list of arguments to supply to the scriptblock or script file.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$Creds = Invoke-AWSTemporaryLogin -ProfileName my-jump-account -Verbose -UseVirtualMFA -TokenCode 527268
+			Invoke-AWSCrossAccountCommand -Credential $Creds -ScriptBlock { Get-IAMRoleList } -AccountId 123456789012 -Role PowerUserRole
+
+			This example gets temporary credentials in the account specified in the profile "my-jump-account" that utilizes a virtual MFA. This account may
+			or may not require MFA. Once those credentials are acquired, they are used to access the remote AWS account, 123456789012, via cross account access.
+			This remote account does require MFA for the cross account assume role to the PowerUserRole. The cmdlet, Get-IAMRoleList is executed in the remote account
+			and then the credentials are reset to the state before the cross account command was executed.
+
+		.INPUTS 
+			None
+
+		.OUTPUTS
+			Ouput of the invoked command.
+
+			The output type is the value of the ScriptBlock parameter or the FilePath parameter.
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 12/18/2017
+	#>
+	[CmdletBinding(DefaultParameterSetName = "NoMFA-SB")]
+	[OutputType()]
+	Param(
+		[Parameter(Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[ValidatePattern("^[0-9]{12}$")]
+		[System.String]$AccountId,
+
+		[Parameter(Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$Role,
+
+		[Parameter()]
+        [ValidateRange(900, 3600)]
+        [System.Int32]$DurationInSeconds = 3600,
+
+		[Parameter(ParameterSetName = "Virtual-SB", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Virtual-File", Mandatory = $true)]
+		[Switch]$UseVirtualMFA,
+
+		[Parameter(ParameterSetName = "Physical-SB", Mandatory = $true)]
+		[Parameter(ParameterSetName = "Physical-File", Mandatory = $true)]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$TokenSerialNumber,
+
+		[Parameter(ParameterSetName = "Virtual-SB")]
+		[Parameter(ParameterSetName = "Virtual-File")]
+		[Parameter(ParameterSetName = "Physical-SB")]
+		[Parameter(ParameterSetName = "Physical-File")]
+		[ValidateNotNullOrEmpty()]
+		[System.String]$TokenCode,
+
+		[Parameter()]
+		[ValidateNotNullOrEmpty()]
+		[ValidatePattern("^[-a-zA-Z0-9=,.@:\/]+$")]
+		[System.String]$ExternalId,
+
+		[Parameter(ParameterSetName = "Virtual-SB", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[Parameter(ParameterSetName = "Physcial-SB", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[Parameter(ParameterSetName = "NoMFA-SB", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[ValidateNotNull()]
+		[ScriptBlock]$ScriptBlock,
+
+		[Parameter(ParameterSetName = "Virtual-File", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[Parameter(ParameterSetName = "Physical-File", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[Parameter(ParameterSetName = "NoMFA-File", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+		[ValidateScript({
+			Test-Path -Path $_
+		})]
+		[System.String]$FilePath,
+
+        [Parameter()]
+        [System.Object[]]$ArgumentList = @(),
+		
+		[Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+	)
+
+	Begin {
+	}
+
+	Process {
+        [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
+
+        # Instead of parsing out the arn details, just capture in a regex
+		$Regex = "^(arn:aws(?:-us-gov|-cn|-iso(?:-b)?)?:iam::)[0-9]{12}:.*$"
+
+        # The '$1' represents Match.Groups[1], the first capture group in the regex, using -replace
+        # replaces the whole input string with just the text from the captured segment, which allows
+        # us to add the destination account id and the role name to the arn, this makes it simpler
+        # than the user having to provide the entire role arn from the other account, they only have to know
+        # its account id and the role name
+		$Arn = ($Identity.Arn -replace $Regex, '$1') + "$AccountId`:role/$Role"
+
+        # The role session name grabs the iam principal type, i.e. user or role, and the principal name with the account id
+        # user/sales/john_123456789012
+		$RoleSessionName = "$($Identity.Arn.Substring($Identity.Arn.LastIndexOf(":") + 1))_$AccountId"
+
+		[System.Collections.Hashtable]$RoleSplat = @{}
+
+		if ($PSBoundParameters.ContainsKey("ExternalId"))
+		{
+			$RoleSplat.Add("ExternalId", $ExternalId)
+		}
+
+        # Make using a virtual MFA easier, they don't need to know its arn, calculate it for them based on their
+		if ($UseVirtualMFA)
+		{
+			$Regex = "^(arn:aws(?:-us-gov|-cn|-iso(?:-b)?)?:iam::[0-9]{12}:)user(\/.*)$"
+
+            if ($Identity.Arn -notmatch $Regex)
+            {
+                throw "The identity you use with a virtual MFA must be a user account, you used $($Identity.Arn)."
+            }
+
+            $TokenSerialNumber = $Identity.Arn -replace $Regex, '$1mfa$2'			
+		}
+
+        [System.Collections.Hashtable]$TokenSplat = @{}
+
+        if ($PSCmdlet.ParameterSetName -ilike "Virtual*" -or $PSCmdlet.ParameterSetName -ilike "Physical*" )
+        {
+            if (-not $PSBoundParameters.ContainsKey("TokenCode"))
+            {
+                $TokenCode = Read-Host -Prompt "Enter MFA token code"
+            }
+
+            $TokenSplat.Add("SerialNumber", $TokenSerialNumber)
+            $TokenSplat.Add("TokenCode", $TokenCode)
+        }
+
+		Write-Verbose -Message "Assuming role $Arn with session name $RoleSessionName."
+
+		[Amazon.SecurityToken.Model.AssumeRoleResponse]$RemoteCredentials = Use-STSRole -RoleArn $Arn -RoleSessionName $RoleSessionName -DurationInSeconds $DurationInSeconds @RoleSplat @SourceSplat @TokenSplat
+    
+        [System.Management.Automation.ScriptBlock]$CredsScriptBlock = {
+            Set-AWSCredential -Credential $using:RemoteCredentials.Credentials
+        }
+
+		if ($PSCmdlet.ParameterSetName -ilike "*-File")
+		{
+            $ScriptBlock = [System.Management.Automation.ScriptBlock]::Create("$(Get-Content -Path $FilePath -Raw)")
+		}
+
+        Start-NewRunspace -ScriptBlock $CredsScriptBlock, $ScriptBlock -ArgumentList $Arg
+	}
+
+	End {
+	}
+}
+
 #endregion
 
 #region EBS Functions
@@ -6554,6 +6952,411 @@ Function Get-AWSVPCEndpointsByLocation {
 
 #endregion
 
+#region CloudTrail Functions
+
+Function Get-AWSCloudTrailLogs {
+	<#
+		.SYNOPSIS
+			Gets CloudTrail log files from an S3 bucket.
+
+		.DESCRIPTION
+			The cmdlet retrieves CloudTrail log data from S3 for the specified region. It expects the S3 keys for the files to be in the AWS created syntax:
+
+			AWSLogs/AccountId/CloudTrail/Region/Year/Month/Day/filename.json.gz
+
+			The contents of the log files are returned uncompressed. Additionally, the returned records can be filtered by eventName, aka API action, like DescribeInstances.
+
+		.PARAMETER Bucket
+			The name of the bucket containing the log files.
+
+		.PARAMETER AccountId
+			Specify the account Id in the S3 object key, this may not be the same as the account in which the S3 bucket exists if cross account CloudTrail log delivery is enabled.
+
+			This parameter defaults to the account associated with the credentials of the calling user.
+
+		.PARAMETER Start
+			Specifies the date to retrieve log files after (inclusive). The date is represented in UTC time.
+
+		.PARAMETER End
+			Specifies the date to retrieve log files before (inclusive). The date is represented in UTC time.
+
+		.PARAMETER APIs
+			Specifies the eventName attribute of the CloudTrail log object to match against when retrieving log records. If this is not specified, all records are returned.
+
+		.PARAMETER Filter
+			You can specify a hash table of key values that correspond to properties of the CloudTrail log. You can specify sub-properties as the key like:
+
+			@{"userIdentity.arn" : "arn:aws:iam::*:instance-profile/*" }
+
+			The value can contain wildcards to match against the CloudTrail log attributes.
+
+		.PARAMETER Region
+			The system name of the AWS region in which the operation should be invoked and the region for which to get CloudTrail log records from S3. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
+
+		.PARAMETER AccessKey
+			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SecretKey
+			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
+
+		.PARAMETER SessionToken
+			The session token if the access and secret keys are temporary session-based credentials.
+
+		.PARAMETER Credential
+			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
+
+		.PARAMETER ProfileLocation 
+			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
+			
+			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
+			
+			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
+			
+			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
+
+		.PARAMETER ProfileName
+			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
+
+		.EXAMPLE
+			$End = [System.DateTime]::Parse("7/1/2017 11:59:59 PM")
+
+			$Results = Get-AWSCloudTrailLogs -Bucket "myaccount-logging" -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End -APIs @("DescribeInstances", "DescribeVolumes")
+			ConvertTo-Json -InputObject $Results
+
+			This gets the CloudTrail log files from 7/1/2017 in us-east-1, the default region, for DescribeInstances and DescribeVolumes API calls. The results are then serialized into JSON.
+
+		.EXAMPLE
+			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
+
+			$Results = Get-AWSCloudTrailLogs -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast2) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
+
+			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-2 region and includes all API calls.
+
+		.EXAMPLE
+			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
+
+			$Results = Get-AWSCloudTrailLogs -Filter @{ "eventName" = "CreateTag" } -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast2) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
+
+			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-2 region and includes CreateTag API calls (this example is identitical to providing the parameter -APIs @("CreateTag") ).
+
+		.EXAMPLE
+			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
+
+			$Results = Get-AWSCloudTrailLogs -Filter @{"eventSource" = "opsworks.amazonaws.com"; "eventName" = "TagResource"} -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast1) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
+
+			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-1 region and includes TagResource events generated from OpsWorks.
+
+		.INPUTS
+			None
+
+		.OUTPUTS
+			System.Management.Automation.PSCustomObject[]
+
+		.NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 8/7/2017
+	#>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject[]])]
+    Param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [System.String]$Bucket,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [ValidateScript({$_.Length -eq 12})]
+        [System.String]$AccountId = [System.String]::Empty,
+
+        [Parameter()]
+        [System.DateTime]$Start = [System.DateTime]::MinValue,
+
+        [Parameter()]
+        [ValidateScript({
+            $_ -ge $Start
+        })]
+        [System.DateTime]$End = [System.DateTime]::MaxValue,
+
+        [Parameter(ParameterSetName = "API")]
+        [ValidateNotNullOrEmpty()]
+        [System.String[]]$APIs = @(),
+
+		[Parameter(ParameterSetName = "Filter")]
+		[System.Collections.Hashtable]$Filter = @{},
+
+        [Parameter()]
+        [ValidateNotNull()]
+        [Amazon.RegionEndpoint]$Region,
+
+        [Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileName = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$AccessKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SecretKey = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$SessionToken = [System.String]::Empty,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[Amazon.Runtime.AWSCredentials]$Credential = $null,
+
+		[Parameter()]
+		[ValidateNotNull()]
+		[System.String]$ProfileLocation = [System.String]::Empty
+    )
+
+    Begin {       
+		$S3TimeRegex = "^([0-9]{4})(0[0-9]|1[0-2])(0[0-9]|[1-2][0-9]|3[0-1])T(0[0-9]|1[0-9]|2[0-3])([0-5][0-9])Z$"
+    }
+
+    Process {
+        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
+
+        [Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @Splat
+
+        if ([System.String]::IsNullOrEmpty($AccountId))
+        {
+            $AccountId = $Identity.Account
+        }
+
+		# We can only set the credentials if 
+		if (($Splat.ContainsKey("AccessKey") -and $Splat.ContainsKey("SecretKey")) -or $Splat.ContainsKey("ProfileName"))
+		{
+			$Temp = $Splat.Clone()
+			$Temp.Remove("Region")
+
+			Set-AWSCredentials @Temp
+		}
+
+        if ($Credential -eq $null)
+        {
+			# This shouldn't return $null since we initialized defaults
+            $Credential = Get-AWSCredentials
+        }
+
+        [Amazon.Runtime.ImmutableCredentials]$Creds = $Credential.GetCredentials()
+
+        [Amazon.S3.IAmazonS3]$S3Client = New-Object -TypeName Amazon.S3.AmazonS3Client($Credential)
+
+        [Amazon.S3.Model.S3Bucket]$S3Bucket = Get-S3Bucket -BucketName $Bucket @Splat
+
+        if ($S3Bucket -ne $null)
+        {
+            $Prefix = "AWSLogs/$AccountId/CloudTrail/$($Splat["Region"])/"
+
+            [Amazon.S3.Model.ListObjectsV2Response]$Response = $null
+            [Amazon.S3.Model.ListObjectsV2Request]$Request = New-Object -TypeName Amazon.S3.Model.ListObjectsV2Request
+            $Request.BucketName = $Bucket
+            $Request.Prefix = $Prefix
+
+            # If a start is defined, find the first key on or after that day
+            if ($Start -gt [System.DateTime]::MinValue) 
+			{
+                [Amazon.S3.Model.S3Object]$FirstObject = $null
+
+				# DateTime is a struct/value type, so this creates a copy
+                [System.DateTime]$TempStart = $Start
+
+                while ($FirstObject -eq $null) 
+				{
+                    if ($TempStart -gt $End -or $TempStart -gt [System.DateTime]::UtcNow) {
+                        throw "No files could be found between the provided start and end times."
+                    }
+
+                    [System.String]$StartPrefix = "$Prefix$($TempStart.Year)/$($TempStart.Month.ToString("d2"))/$($TempStart.Day.ToString("d2"))/"
+                    
+					Write-Verbose -Message "Testing start prefix $StartPrefix"
+                    
+					$FirstObject = Get-S3Object -BucketName $Bucket -KeyPrefix $StartPrefix -MaxKey 1 @Splat
+                    $TempStart = $TempStart.AddDays(1)
+                }
+
+                Write-Verbose -Message "First key $($FirstObject.Key)"
+
+                # S3 will ignore this parameter after the first request if the ContinuationToken is set
+				# This will at least get us close to the right place to start, it will get the first log from that day (in UTC), although
+				# our start time may be minutes to hours after 00:00 AM on the specified day
+                $Request.StartAfter = $FirstObject.Key
+            }
+
+            [System.String[]]$Files = @()
+
+            do {
+                if (-not [System.String]::IsNullOrEmpty($Request.ContinuationToken)) 
+                {
+                    Write-Progress -Activity "Listing objects" -Status "Making continuation request with marker $($Request.ContinuationToken) for 1000 objects"
+                }
+
+                $Response = $S3Client.ListObjectsV2($Request)
+
+                foreach ($Object in $Response.S3Objects)
+                {
+					# Remove the known prefix from the key, and then split into the parts of the key path
+					# The filename is in this format: 415720405880_CloudTrail_us-east-1_20170825T0300Z_gFC6PugTVDycrQIy.json.gz
+					# Use the time here to create the $Time variable
+					# After removing the prefix we get 2017/08/25/415720405880_CloudTrail_us-east-1_20170825T0300Z_gFC6PugTVDycrQIy.json.gz
+                    $Parts = $Object.Key.Remove(0, $Prefix.Length).Split("/")
+					
+					# Get the last part of the remainder
+					$FileName = $Parts[-1]
+
+					# We need to use the time string in the file name because just parsing the DateTime with the year, month, day results in a time of 00:00 AM,
+					# which would be less than a time specified by the user like 06:00 AM, even if the log was actually posted at 07:00 AM
+					$FileNameParts = $FileName.Split("_")
+					$TimeString = $FileNameParts[3]
+
+					Write-Verbose -Message "Time from prefix $TimeString"
+					
+					if ($TimeString -match $S3TimeRegex)
+					{
+						[System.DateTime]$Time = [System.DateTime]::ParseExact($TimeString, "yyyyMMddTHHmmZ", [CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).ToUniversalTime()
+
+						# Check start to make sure the start marker or items after it weren't before the specified start hour/minute for the day
+						# The start marker is the first object for the specified day, but may not be after the specified time since the parsed date time
+						# for the start defaults to midnight 00:00 AM
+						if ($Time -ge $Start) {
+							if ($Time -le $End) {
+								$Files += $Object.Key
+								Write-Verbose -Message "Adding key $($Object.Key)"
+							}
+							else 
+							{
+								# Otherwise we've gotten into objects that are past the end time
+								# Go ahead and end the do/while loop and break from this foreach loop
+								Write-Verbose -Message "Passed end time with $Time."
+								$Response.IsTruncated = $false
+								break
+							}
+						}
+					}
+					else 
+					{
+						Write-Verbose -Message "$TimeString did not match the expected pattern for the timestamp in an S3 log."
+					}
+                }
+
+                $Request.ContinuationToken = $Response.NextContinuationToken
+
+            } while ($Response.IsTruncated)
+
+            Write-Progress -Activity "Listing objects" -Completed
+
+			if ($Files.Length -gt 0)
+			{ 
+                [Amazon.S3.Transfer.TransferUtility]$TransferUtility = New-Object -TypeName Amazon.S3.Transfer.TransferUtility($S3Client)
+						    
+                [System.Management.Automation.ScriptBlock]$ScriptBlock = {
+                        Param(
+						    [System.String]$File,
+						    [System.String]$Bucket,
+						    [Amazon.S3.Transfer.TransferUtility]$TransferUtility,
+						    [System.String[]]$APIs,
+						    [System.Collections.Hashtable]$Filter
+					    )
+
+					    try {
+						    [Amazon.S3.Transfer.TransferUtilityOpenStreamRequest]$StreamRequest = New-Object -TypeName Amazon.S3.Transfer.TransferUtilityOpenStreamRequest
+						    $StreamRequest.BucketName = $Bucket
+
+						    $StreamRequest.Key = $File
+						    [System.IO.Stream]$Stream = $TransferUtility.OpenStream($StreamRequest)
+						    [System.IO.Compression.GZipStream]$GZipStream = New-Object -TypeName System.IO.Compression.GZipStream($Stream, [System.IO.Compression.CompressionMode]::Decompress)
+
+						    [System.IO.StreamReader]$Reader = New-Object -TypeName System.IO.StreamReader($GZipStream)
+
+						    $Content = $Reader.ReadToEnd()
+
+						    $Temp = ConvertFrom-Json -InputObject $Content
+
+						    [PSCustomObject[]]$Records = $null
+
+						    if ($APIs.Length -gt 0)
+						    {
+							    $Temp.Records = $Temp.Records | Where-Object {$_.eventName -iin $APIs}
+						    }
+					
+						    if ($Filter.Count -gt 0)
+						    {
+							    foreach ($Item in $Filter.GetEnumerator())
+							    {
+								    $Parts = $Item.Key.Split(".")
+
+								    $Temp.Records = $Temp.Records | Where-Object {
+									    $TempVal = $_
+								
+									    # This will expand the sub properties if the key is "dotted" like user.id
+									    foreach ($Part in $Parts) {
+										    $TempVal = $TempVal | Select-Object -ExpandProperty $Part
+									    }
+        
+									    $TempVal -ilike $Item.Value
+								    }    
+							    }
+						    }
+                    
+						    $Records = $Temp.Records
+
+						    if ($Records -ne $null -and $Records.Length -gt 0) {                    
+							    Write-Output -InputObject $Records
+						    }
+					    }
+					    finally 
+					    {
+						    if ($Reader -ne $null) 
+						    {
+							    $Reader.Dispose()
+						    }
+
+						    if ($GZipStream -ne $null) 
+						    {
+							    $GZipStream.Dispose()
+						    }
+
+						    if ($Stream -ne $null) 
+						    {
+							    $Stream.Dispose()       
+						    }     
+					    }
+                    }
+
+                Write-Progress -Activity "Downloading files"
+                $Counter = 0
+                [PSCustomObject[]]$Results = @()
+
+                foreach($File in $Files)
+                {
+                    Write-Progress -Activity "Downloading files" -Status "Downloading file $File" -PercentComplete (($Counter++ / $Files.Count) * 100)
+                    
+                    [PSCustomObject[]]$Result = Invoke-Command -ScriptBlock $ScriptBlock -ArgumentList @($File, $Bucket, $TransferUtility, $APIs, $Filter)
+                    $Results += $Result
+                }
+                
+                Write-Progress -Activity "Downloading files" -Completed
+
+				Write-Output -InputObject $Results
+			}
+			else {
+				throw "No CloudTrail Log Files discovered between $Start and $End in $Bucket using prefix $Prefix."
+			}
+        }
+        else {
+            throw "The bucket $Bucket could not be found in account $($Identity.Account)."
+        }
+    }
+
+    End {
+    }
+}
+
+#endregion
 
 Function Invoke-AWSNetworkAdapterFixOnOfflineDisk {
 	<#
@@ -7741,401 +8544,6 @@ Function Invoke-AWSNetworkAdapterFixOnRemoteInstance {
 	}
 }
 
-
-Function Get-AWSCloudTrailLogs {
-	<#
-		.SYNOPSIS
-			Gets CloudTrail log files from an S3 bucket.
-
-		.DESCRIPTION
-			The cmdlet retrieves CloudTrail log data from S3 for the specified region. It expects the S3 keys for the files to be in the AWS created syntax:
-
-			AWSLogs/AccountId/CloudTrail/Region/Year/Month/Day/filename.json.gz
-
-			The contents of the log files are returned uncompressed. Additionally, the returned records can be filtered by eventName, aka API action, like DescribeInstances.
-
-		.PARAMETER Bucket
-			The name of the bucket containing the log files.
-
-		.PARAMETER AccountId
-			Specify the account Id in the S3 object key, this may not be the same as the account in which the S3 bucket exists if cross account CloudTrail log delivery is enabled.
-
-			This parameter defaults to the account associated with the credentials of the calling user.
-
-		.PARAMETER Start
-			Specifies the date to retrieve log files after (inclusive). The date is represented in UTC time.
-
-		.PARAMETER End
-			Specifies the date to retrieve log files before (inclusive). The date is represented in UTC time.
-
-		.PARAMETER APIs
-			Specifies the eventName attribute of the CloudTrail log object to match against when retrieving log records. If this is not specified, all records are returned.
-
-		.PARAMETER Filter
-			You can specify a hash table of key values that correspond to properties of the CloudTrail log. You can specify sub-properties as the key like:
-
-			@{"userIdentity.arn" : "arn:aws:iam::*:instance-profile/*" }
-
-			The value can contain wildcards to match against the CloudTrail log attributes.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked and the region for which to get CloudTrail log records from S3. For example, us-east-1, eu-west-1 etc. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			$End = [System.DateTime]::Parse("7/1/2017 11:59:59 PM")
-
-			$Results = Get-AWSCloudTrailLogs -Bucket "myaccount-logging" -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End -APIs @("DescribeInstances", "DescribeVolumes")
-			ConvertTo-Json -InputObject $Results
-
-			This gets the CloudTrail log files from 7/1/2017 in us-east-1, the default region, for DescribeInstances and DescribeVolumes API calls. The results are then serialized into JSON.
-
-		.EXAMPLE
-			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
-
-			$Results = Get-AWSCloudTrailLogs -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast2) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
-
-			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-2 region and includes all API calls.
-
-		.EXAMPLE
-			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
-
-			$Results = Get-AWSCloudTrailLogs -Filter @{ "eventName" = "CreateTag" } -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast2) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
-
-			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-2 region and includes CreateTag API calls (this example is identitical to providing the parameter -APIs @("CreateTag") ).
-
-		.EXAMPLE
-			$End = [System.DateTime]::Parse("7/31/2017 11:59:59 PM")
-
-			$Results = Get-AWSCloudTrailLogs -Filter @{"eventSource" = "opsworks.amazonaws.com"; "eventName" = "TagResource"} -Bucket "myaccount-logging" -Region ([Amazon.RegionEndpoint]::USEast1) -ProfileName myaccount -Start ([System.DateTime]::Parse("7/1/2017")) -End $End
-
-			This gets the CloudTrail log files from 7/1/2017 to 7/31/2017 in the us-east-1 region and includes TagResource events generated from OpsWorks.
-
-		.INPUTS
-			None
-
-		.OUTPUTS
-			System.Management.Automation.PSCustomObject[]
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 8/7/2017
-	#>
-    [CmdletBinding()]
-    [OutputType([PSCustomObject[]])]
-    Param(
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [System.String]$Bucket,
-
-        [Parameter()]
-        [ValidateNotNullOrEmpty()]
-        [ValidateScript({$_.Length -eq 12})]
-        [System.String]$AccountId = [System.String]::Empty,
-
-        [Parameter()]
-        [System.DateTime]$Start = [System.DateTime]::MinValue,
-
-        [Parameter()]
-        [ValidateScript({
-            $_ -ge $Start
-        })]
-        [System.DateTime]$End = [System.DateTime]::MaxValue,
-
-        [Parameter(ParameterSetName = "API")]
-        [ValidateNotNull()]
-        [System.String[]]$APIs = @(),
-
-		[Parameter(ParameterSetName = "Filter")]
-		[System.Collections.Hashtable]$Filter = @{},
-
-        [Parameter()]
-        [ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileName = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$AccessKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SecretKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SessionToken = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.Runtime.AWSCredentials]$Credential = $null,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileLocation = [System.String]::Empty
-    )
-
-    Begin {       
-		$S3TimeRegex = "^([0-9]{4})(0[0-9]|1[0-2])(0[0-9]|[1-2][0-9]|3[0-1])T(0[0-9]|1[0-9]|2[0-3])([0-5][0-9])Z$"
-    }
-
-    Process {
-        Initialize-AWSDefaults
-
-        if ($Region -eq $null) 
-		{
-            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
-        }
-
-        [System.Collections.Hashtable]$Splat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-
-        [Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @Splat
-
-        if ([System.String]::IsNullOrEmpty($AccountId))
-        {
-            $AccountId = $Identity.Account
-        }
-
-		# We can only set the credentials if 
-		if (($Splat.ContainsKey("AccessKey") -and $Splat.ContainsKey("SecretKey")) -or $Splat.ContainsKey("ProfileName"))
-		{
-			$Temp = $Splat
-			$Temp.Remove("Region")
-
-			Set-AWSCredentials @Temp
-		}
-
-        if ($Credential -eq $null)
-        {
-			# This shouldn't return $null since we initialized defaults
-            $Credential = Get-AWSCredentials
-        }
-
-        [Amazon.S3.IAmazonS3]$S3Client = New-Object -TypeName Amazon.S3.AmazonS3Client($Credential)
-
-        [Amazon.S3.Model.S3Bucket]$S3Bucket = Get-S3Bucket -BucketName $Bucket @Splat
-
-        if ($S3Bucket -ne $null)
-        {
-            $Prefix = "AWSLogs/$AccountId/CloudTrail/$($Region.SystemName)/"
-
-            [Amazon.S3.Model.ListObjectsV2Response]$Response = $null
-            [Amazon.S3.Model.ListObjectsV2Request]$Request = New-Object -TypeName Amazon.S3.Model.ListObjectsV2Request
-            $Request.BucketName = $Bucket
-            $Request.Prefix = $Prefix
-
-            # If a start is defined, find the first key on or after that day
-            if ($Start -gt [System.DateTime]::MinValue) 
-			{
-                [Amazon.S3.Model.S3Object]$FirstObject = $null
-
-				# DateTime is a struct/value type, so this creates a copy
-                [System.DateTime]$TempStart = $Start
-
-                while ($FirstObject -eq $null) 
-				{
-                    if ($TempStart -gt $End -or $TempStart -gt [System.DateTime]::UtcNow) {
-                        throw "No files could be found between the provided start and end times."
-                    }
-
-                    [System.String]$StartPrefix = "$Prefix$($TempStart.Year)/$($TempStart.Month.ToString("d2"))/$($TempStart.Day.ToString("d2"))/"
-                    
-					Write-Verbose -Message "Testing start prefix $StartPrefix"
-                    
-					$FirstObject = Get-S3Object -BucketName $Bucket -KeyPrefix $StartPrefix -MaxKey 1 @Splat
-                    $TempStart = $TempStart.AddDays(1)
-                }
-
-                Write-Verbose -Message "First key $($FirstObject.Key)"
-
-                # S3 will ignore this parameter after the first request if the ContinuationToken is set
-				# This will at least get us close to the right place to start, it will get the first log from that day (in UTC), although
-				# our start time may be minutes to hours after 00:00 AM on the specified day
-                $Request.StartAfter = $FirstObject.Key
-            }
-
-            [System.String[]]$Files = @()
-
-            do {
-                if (-not [System.String]::IsNullOrEmpty($Request.ContinuationToken)) 
-                {
-                    Write-Progress -Activity "Listing objects" -Status "Making continuation request with marker $($Request.ContinuationToken) for 1000 objects"
-                }
-
-                $Response = $S3Client.ListObjectsV2($Request)
-
-                foreach ($Object in $Response.S3Objects)
-                {
-					# Remove the known prefix from the key, and then split into the parts of the key path
-					# The filename is in this format: 415720405880_CloudTrail_us-east-1_20170825T0300Z_gFC6PugTVDycrQIy.json.gz
-					# Use the time here to create the $Time variable
-					# After removing the prefix we get 2017/08/25/415720405880_CloudTrail_us-east-1_20170825T0300Z_gFC6PugTVDycrQIy.json.gz
-                    $Parts = $Object.Key.Remove(0, $Prefix.Length).Split("/")
-					
-					# Get the last part of the remainder
-					$FileName = $Parts[-1]
-
-					# We need to use the time string in the file name because just parsing the DateTime with the year, month, day results in a time of 00:00 AM,
-					# which would be less than a time specified by the user like 06:00 AM, even if the log was actually posted at 07:00 AM
-					$FileNameParts = $FileName.Split("_")
-					$TimeString = $FileNameParts[3]
-
-					Write-Verbose -Message "Time from prefix $TimeString"
-					
-					if ($TimeString -match $S3TimeRegex)
-					{
-						[System.DateTime]$Time = [System.DateTime]::ParseExact($TimeString, "yyyyMMddTHHmmZ", [CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).ToUniversalTime()
-
-						# Check start to make sure the start marker or items after it weren't before the specified start hour/minute for the day
-						# The start marker is the first object for the specified day, but may not be after the specified time since the parsed date time
-						# for the start defaults to midnight 00:00 AM
-						if ($Time -ge $Start) {
-							if ($Time -le $End) {
-								$Files += $Object.Key
-								Write-Verbose -Message "Adding key $($Object.Key)"
-							}
-							else 
-							{
-								# Otherwise we've gotten into objects that are past the end time
-								# Go ahead and end the do/while loop and break from this foreach loop
-								Write-Verbose -Message "Passed end time with $Time."
-								$Response.IsTruncated = $false
-								break
-							}
-						}
-					}
-					else 
-					{
-						Write-Verbose -Message "$TimeString did not match the expected pattern for the timestamp in an S3 log."
-					}
-                }
-
-                $Request.ContinuationToken = $Response.NextContinuationToken
-
-            } while ($Response.IsTruncated)
-
-            [Amazon.S3.Transfer.TransferUtility]$TransferUtility = New-Object -TypeName Amazon.S3.Transfer.TransferUtility($S3Client)
-            [Amazon.S3.Transfer.TransferUtilityOpenStreamRequest]$StreamRequest = New-Object -TypeName Amazon.S3.Transfer.TransferUtilityOpenStreamRequest
-            $StreamRequest.BucketName = $Bucket
-
-			if ($Files.Length -gt 0)
-			{
-				[PSCustomObject[]]$Results = ForEach-ObjectParallel -WaitTime 500 -InputObject $Files -Verbose -Parameters @{"Bucket" = $Bucket; "S3Client" = $S3Client; "APIs" = $APIs; "Filter" = $Filter } -ScriptBlock {
-					Param(
-						[System.String]$File,
-						[System.String]$Bucket,
-						[Amazon.S3.IAmazonS3]$S3Client,
-						[System.String[]]$APIs,
-						[System.Collections.Hashtable]$Filter
-					)
-
-					try {
-						[Amazon.S3.Transfer.TransferUtility]$TransferUtility = New-Object -TypeName Amazon.S3.Transfer.TransferUtility($S3Client)
-						[Amazon.S3.Transfer.TransferUtilityOpenStreamRequest]$StreamRequest = New-Object -TypeName Amazon.S3.Transfer.TransferUtilityOpenStreamRequest
-						$StreamRequest.BucketName = $Bucket
-
-						$StreamRequest.Key = $File
-						[System.IO.Stream]$Stream = $TransferUtility.OpenStream($StreamRequest)
-						[System.IO.Compression.GZipStream]$GZipStream = New-Object -TypeName System.IO.Compression.GZipStream($Stream, [System.IO.Compression.CompressionMode]::Decompress)
-
-						[System.IO.StreamReader]$Reader = New-Object -TypeName System.IO.StreamReader($GZipStream)
-
-						$Content = $Reader.ReadToEnd()
-
-						$Temp = ConvertFrom-Json -InputObject $Content
-
-						[PSCustomObject[]]$Records = $null
-
-						if ($APIs.Length -gt 0)
-						{
-							$Temp.Records = $Temp.Records | Where-Object {$_.eventName -iin $APIs}
-						}
-					
-						if ($Filter.Count -gt 0)
-						{
-							foreach ($Item in $Filter.GetEnumerator())
-							{
-								$Parts = $Item.Key.Split(".")
-
-								$Temp.Records = $Temp.Records | Where-Object {
-									$TempVal = $_
-								
-									# This will expand the sub properties if the key is "dotted" like user.id
-									foreach ($Part in $Parts) {
-										$TempVal = $TempVal | Select-Object -ExpandProperty $Part
-									}
-        
-									$TempVal -ilike $Item.Value
-								}    
-							}
-						}
-                    
-						$Records = $Temp.Records
-
-						if ($Records -ne $null -and $Records.Length -gt 0) {                    
-							Write-Output -InputObject $Records
-						}
-					}
-					finally 
-					{
-						if ($Reader -ne $null) 
-						{
-							$Reader.Dispose()
-						}
-
-						if ($GZipStream -ne $null) 
-						{
-							$GZipStream.Dispose()
-						}
-
-						if ($Stream -ne $null) 
-						{
-							$Stream.Dispose()       
-						}     
-					}
-				}
-
-				Write-Output -InputObject $Results
-			}
-			else {
-				throw "No CloudTrail Log Files discovered between $Start and $End in $Bucket using prefix $Prefix."
-			}
-        }
-        else {
-            throw "The bucket $Bucket could not be found in account $($Identity.Account)."
-        }
-    }
-
-    End {
-    }
-}
-
 Function Invoke-AWSTemporaryLogin {
 	<#
 		.SYNOPSIS
@@ -8257,12 +8665,6 @@ Function Invoke-AWSTemporaryLogin {
 	}
 
 	Process {
-		Initialize-AWSDefaults
-
-        if ($Region -eq $null) {
-            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
-        }
-
         [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
 
 		if ($UseVirtualMFA)
@@ -8290,254 +8692,9 @@ Function Invoke-AWSTemporaryLogin {
 	}
 
 	End {
-
 	}
 }
 
-Function Invoke-AWSCrossAccountCommand {
-	<#
-		.SYNOPSIS
-			Executes an assume role into another account with the provided credentials and executes a scriptblock.
-
-		.DESCRIPTION
-			This cmdlet executes a Use-STSRole in the account number specified with the supplied credentials. The role specified is assumed, 
-			the default credentials are updated, the scriptblock is run, and the temporary credentials are then removed. The cmdlet effectively
-			lets you run entire scripts in remote account accounts via cross account access.
-
-		.PARAMETER AccountId
-			The 12 digit account id to run the scriptblock in.
-
-		.PARAMETER Role
-			The role name to assume in the remote account.
-
-		.PARAMETER ExternalId
-			The external id provided by the central jump account for this remote account.
-
-		.PARAMETER ScriptBlock
-			The block of script to execute in the remote account.
-
-		.PARAMETER FilePath
-			The path to the script to execute against the remote account.
-
-		.PARAMETER UseVirtualMFA
-			Specifies that an AWS virtual MFA is being used.
-
-		.PARAMETER TokenSerialNumber
-			The serial number of the physical MFA token.
-
-		.PARAMETER TokenCode
-			The current MFA token code, if this is not specified, but either UseVirtualMFA or TokenSerialNumber are specified, you will be prompted
-			to enter the token code.
-
-		.PARAMETER DurationInSeconds
-			The length of time the temporary credentials are good for between 900 and 3600 seconds. This defaults to 3600, which is 1 hour.
-
-		.PARAMETER Region
-			The system name of the AWS region in which the operation should be invoked. This defaults to the default regions set in PowerShell, or us-east-1 if not default has been set.
-
-		.PARAMETER AccessKey
-			The AWS access key for the user account. This can be a temporary access key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SecretKey
-			The AWS secret key for the user account. This can be a temporary secret key if the corresponding session token is supplied to the -SessionToken parameter.
-
-		.PARAMETER SessionToken
-			The session token if the access and secret keys are temporary session-based credentials.
-
-		.PARAMETER Credential
-			An AWSCredentials object instance containing access and secret key information, and optionally a token for session-based credentials.
-
-		.PARAMETER ProfileLocation 
-			Used to specify the name and location of the ini-format credential file (shared with the AWS CLI and other AWS SDKs)
-			
-			If this optional parameter is omitted this cmdlet will search the encrypted credential file used by the AWS SDK for .NET and AWS Toolkit for Visual Studio first. If the profile is not found then the cmdlet will search in the ini-format credential file at the default location: (user's home directory)\.aws\credentials. Note that the encrypted credential file is not supported on all platforms. It will be skipped when searching for profiles on Windows Nano Server, Mac, and Linux platforms.
-			
-			If this parameter is specified then this cmdlet will only search the ini-format credential file at the location given.
-			
-			As the current folder can vary in a shell or during script execution it is advised that you use specify a fully qualified path instead of a relative path.
-
-		.PARAMETER ProfileName
-			The user-defined name of an AWS credentials or SAML-based role profile containing credential information. The profile is expected to be found in the secure credential file shared with the AWS SDK for .NET and AWS Toolkit for Visual Studio. You can also specify the name of a profile stored in the .ini-format credential file used with the AWS CLI and other AWS SDKs.
-
-		.EXAMPLE
-			$Creds = Invoke-AWSTemporaryLogin -ProfileName my-jump-account -Verbose -UseVirtualMFA -TokenCode 527268
-			Invoke-AWSCrossAccountCommand -Credential $Creds -ScriptBlock { Get-IAMRoleList } -AccountId 123456789012 -Role PowerUserRole
-
-			This example gets temporary credentials in the account specified in the profile "my-jump-account" that utilizes a virtual MFA. This account may
-			or may not require MFA. Once those credentials are acquired, they are used to access the remote AWS account, 123456789012, via cross account access.
-			This remote account does require MFA for the cross account assume role to the PowerUserRole. The cmdlet, Get-IAMRoleList is executed in the remote account
-			and then the credentials are reset to the state before the cross account command was executed.
-
-		.INPUTS 
-			None
-
-		.OUTPUTS
-			Ouput of the invoked command.
-
-			The output type is the value of the ScriptBlock parameter or the FilePath parameter.
-
-		.NOTES
-			AUTHOR: Michael Haken
-			LAST UPDATE: 12/18/2017
-	#>
-	[CmdletBinding(DefaultParameterSetName = "NoMFA-SB")]
-	[OutputType()]
-	Param(
-		[Parameter(Mandatory = $true)]
-		[ValidateNotNullOrEmpty()]
-		[ValidatePattern("^[0-9]{12}$")]
-		[System.String]$AccountId,
-
-		[Parameter(Mandatory = $true)]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$Role,
-
-		[Parameter()]
-        [ValidateRange(900, 3600)]
-        [System.Int32]$DurationInSeconds = 3600,
-
-		[Parameter(ParameterSetName = "Virtual-SB", Mandatory = $true)]
-		[Parameter(ParameterSetName = "Virtual-File", Mandatory = $true)]
-		[Switch]$UseVirtualMFA,
-
-		[Parameter(ParameterSetName = "Physical-SB", Mandatory = $true)]
-		[Parameter(ParameterSetName = "Physical-File", Mandatory = $true)]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$TokenSerialNumber,
-
-		[Parameter(ParameterSetName = "Virtual-SB")]
-		[Parameter(ParameterSetName = "Virtual-File")]
-		[Parameter(ParameterSetName = "Physical-SB")]
-		[Parameter(ParameterSetName = "Physical-File")]
-		[ValidateNotNullOrEmpty()]
-		[System.String]$TokenCode,
-
-		[Parameter()]
-		[ValidateNotNullOrEmpty()]
-		[ValidatePattern("^[-a-zA-Z0-9=,.@:\/]+$")]
-		[System.String]$ExternalId,
-
-		[Parameter(ParameterSetName = "Virtual-SB", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-		[Parameter(ParameterSetName = "Physcial-SB", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-		[Parameter(ParameterSetName = "NoMFA-SB", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-		[ValidateNotNull()]
-		[ScriptBlock]$ScriptBlock,
-
-		[Parameter(ParameterSetName = "Virtual-File", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-		[Parameter(ParameterSetName = "Physical-File", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-		[Parameter(ParameterSetName = "NoMFA-File", Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
-		[ValidateScript({
-			Test-Path -Path $_
-		})]
-		[System.String]$FilePath,
-		
-		[Parameter()]
-        [ValidateNotNull()]
-        [Amazon.RegionEndpoint]$Region,
-
-        [Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileName = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$AccessKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SecretKey = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$SessionToken = [System.String]::Empty,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[Amazon.Runtime.AWSCredentials]$Credential = $null,
-
-		[Parameter()]
-		[ValidateNotNull()]
-		[System.String]$ProfileLocation = [System.String]::Empty
-	)
-
-	Begin {
-	}
-
-	Process {
-		Initialize-AWSDefaults
-
-        if ($Region -eq $null) {
-            $Region = [Amazon.RegionEndpoint]::GetBySystemName((Get-DefaultAWSRegion))
-        }
-
-        [System.Collections.Hashtable]$SourceSplat = New-AWSSplat -Region $Region -ProfileName $ProfileName -AccessKey $AccessKey -SecretKey $SecretKey -SessionToken $SessionToken -Credential $Credential -ProfileLocation $ProfileLocation 
-
-		[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
-
-		$Regex = "^(arn:aws(?:-us-gov|-cn)?:iam::)[0-9]{12}:.*$"
-		$Arn = ($Identity.Arn -replace $Regex, '$1') + "$AccountId`:role/$Role"
-
-		$RoleSessionName = "$($Identity.Arn.Substring($Identity.Arn.LastIndexOf("/") + 1))_$AccountId"
-
-		[System.Collections.Hashtable]$RoleSplat = @{}
-
-		if ($PSBoundParameters.ContainsKey("ExternalId"))
-		{
-			$RoleSplat.Add("ExternalId", $ExternalId)
-		}
-
-		if ($UseVirtualMFA)
-		{
-			[Amazon.SecurityToken.Model.GetCallerIdentityResponse]$Identity = Get-STSCallerIdentity @SourceSplat
-			$Regex = "^(arn:aws(?:-us-gov|-cn)?:iam::[0-9]{12}:)user(\/.*)$"
-
-            $TokenSerialNumber = $Identity.Arn -replace $Regex, '$1mfa$2'			
-		}
-
-        [System.Collections.Hashtable]$TokenSplat = @{}
-
-        if ($PSCmdlet.ParameterSetName -ilike "Virtual*" -or $PSCmdlet.ParameterSetName -ilike "Physical*" )
-        {
-            if (-not $PSBoundParameters.ContainsKey("TokenCode"))
-            {
-                $TokenCode = Read-Host -Prompt "Enter MFA token code"
-            }
-
-            $TokenSplat.Add("SerialNumber", $TokenSerialNumber)
-            $TokenSplat.Add("TokenCode", $TokenCode)
-        }
-
-		Write-Verbose -Message "Assuming role $Arn with session name $RoleSessionName."
-
-		[Amazon.SecurityToken.Model.AssumeRoleResponse]$RemoteCredentials = Use-STSRole -RoleArn $Arn -RoleSessionName $RoleSessionName -DurationInSeconds $DurationInSeconds @RoleSplat @SourceSplat @TokenSplat
-
-		try
-		{
-			if ($PSCmdlet.ParameterSetName -ilike "*-SB")
-			{
-				# Add the set-awscredential to the script block since the executed script block doesn't respect the credentials set in this ps host
-				Write-Verbose -Message "Running scriptblock."
-				$ScriptBlock = [System.Management.Automation.ScriptBlock]::Create("Set-AWSCredential -AccessKey $($RemoteCredentials.Credentials.AccessKeyId) -SecretKey $($RemoteCredentials.Credentials.SecretAccessKey) -SessionToken $($RemoteCredentials.Credentials.SessionToken)`n$ScriptBlock")
-				
-				& $ScriptBlock
-			}
-			else
-			{
-				Set-AWSCredential -Credential $RemoteCredentials.Credentials
-				Write-Verbose -Message "Running script path."
-
-				& $FilePath
-			}
-		}
-		finally 
-		{
-			Clear-AWSCredential
-		}
-	}
-
-	End {
-	}
-}
 
 Function Get-AWSSupportCaseList {
 	<#
