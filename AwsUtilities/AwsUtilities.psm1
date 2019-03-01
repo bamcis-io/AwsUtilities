@@ -951,6 +951,26 @@ Function Get-EC2CurrentImageIds {
 
             The output is a	json formatted string that is targetted for usage in the Mappings section in an AWS Cloudformation script. This gives you an easy way to reference the most recent AMI id for an OS in CloudFormation as well as easily update that mapping element over time.
 
+		.PARAMETER OperatingSystem
+			If this parameter is not specified, the image id for all current major distributions are returned. If you specify one or more operating systems, only image ids for those OS's will be returned.
+
+			The available list of operating systems:
+
+			"WindowsServer2019", 
+			"WindowsServer2016", 
+			"WindowsServer2012R2", 
+			"WindowsServer2012", 
+			"AmazonLinux_x86_64", 
+			"AmazonLinux2_x86_64", 
+			"AmazonLinux2_arm64", 
+			"AmazonLinux2_netcore21_x86_64",
+			"Ubuntu1804_x86_64", 
+			"Ubuntu1804_arm64", 
+			"Ubuntu1804_netcore21_x86_64",
+			"SUSE15_x86_64", 
+			"CentOS7_x86_64", 
+			"Debian9_x86_64"
+
 		.PARAMETER Region
 			The system name of the AWS region in which the operation should be invoked. For example, us-east-1, eu-west-1 etc. 
 
@@ -986,6 +1006,11 @@ Function Get-EC2CurrentImageIds {
 			Retrieves the AMI mappings for all included Operating Systems in every public region.
 
 		.EXAMPLE
+			Get-EC2CurrentImageIds -OperatingSystem WindowsServer2019,WindowsServer2016,AmazonLinux2_x86_x64
+
+			Retrieves the AMI mappings for Windows Server 2019, Windows Server 2016, and Amazon Linux 2.
+
+		.EXAMPLE
 			Get-EC2CurrentImageIds -Region ([Amazon.RegionEndpoint]::UsEast1) -ProfileName myprodprofile
 
 			Gets the AMI mappings for all included Operating Systems in the us-east-1 region using the credentials in the "myprodprofile" profile.
@@ -998,10 +1023,19 @@ Function Get-EC2CurrentImageIds {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 1/17/2019		
+			LAST UPDATE: 3/1/2019		
 	#>
     [CmdletBinding()]
     Param(
+		[Parameter(Position = 0)]
+		[ValidateNotNullOrEmpty()]
+		[ValidateSet("WindowsServer2019", "WindowsServer2016", "WindowsServer2012R2", "WindowsServer2012", 
+			"AmazonLinux_x86_64", "AmazonLinux2_x86_64", "AmazonLinux2_arm64", "AmazonLinux2_netcore21_x86_64",
+			"Ubuntu1804_x86_64", "Ubuntu1804_arm64", "Ubuntu1804_netcore21_x86_64",
+			"SUSE15_x86_64", "CentOS7_x86_64", "Debian9_x86_64"
+		)]
+		[System.String[]]$OperatingSystem = @(),
+
 		[Parameter()]
 		[ValidateNotNull()]
 		[Amazon.RegionEndpoint]$Region,
@@ -1066,6 +1100,18 @@ Function Get-EC2CurrentImageIds {
         [PSCustomObject]$Results = [PSCustomObject]@{}
 
         $Jobs = @()
+
+		if ($OperatingSystem -ne $null -and $OperatingSystem.Count -gt 0)
+		{
+            [System.Collections.Hashtable]$Filtered = $OperatingSystems.Clone()
+			$OperatingSystems = $OperatingSystems.Keys | ForEach-Object {
+                if ($_ -inotin $OperatingSystem)
+                {
+                    $Filtered.Remove($_)
+                }
+            }
+            $OperatingSystems = $Filtered.Clone()
+		}
         
         foreach ($Item in $Regions)
         {

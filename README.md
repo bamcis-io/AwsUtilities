@@ -13,12 +13,14 @@ This example retrieves the user identities that ran DescribeInstances on the dat
 
 ## Revision History
 
+### 1.0.6.0
+Added a filtering capability to Get-EC2CurrentImageIds.
+
 ### 1.0.5.0
 All cmdlets have been refactored and optimized.
 
 Added Get-AWSVPCEndpointsByLocation cmdlet. Updated Get-AWSAmiMappings. Added Get-AWSAccountId and Get-AWSIAMPrincipalId. Changed parameter names for Get-S3ETagCalculation. Removed price list API cmdlets and moved to a separate module.
 	
-
 ### 1.0.4.1
 Updated dependencies in the manifest.
 
