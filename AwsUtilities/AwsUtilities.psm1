@@ -399,7 +399,7 @@ Function Get-EC2InstanceRegion {
         }
 	
 		Invoke-Command -ScriptBlock {
-			[Microsoft.PowerShell.Commands.WebResponseObject]$Response = Invoke-WebRequest -Uri http://169.254.169.254/latest/dynamic/instance-identity/document
+			[Microsoft.PowerShell.Commands.WebResponseObject]$Response = Invoke-WebRequest -Uri http://169.254.169.254/latest/dynamic/instance-identity/document -UseBasicParsing
             ConvertFrom-Json -InputObject $Response.Content | Select-Object -ExpandProperty Region | Write-Output
 		} @Splat | Write-Output
 	}
@@ -472,7 +472,7 @@ Function Get-EC2InstanceId {
         }
 	
 		Invoke-Command -ScriptBlock {
-			[Microsoft.PowerShell.Commands.WebResponseObject]$Response = Invoke-WebRequest -Uri http://169.254.169.254/latest/meta-data/instance-id
+			[Microsoft.PowerShell.Commands.WebResponseObject]$Response = Invoke-WebRequest -Uri http://169.254.169.254/latest/meta-data/instance-id -UseBasicParsing
             $Response.Content | Write-Output
 		} @Splat | Write-Output
 	}
@@ -3554,7 +3554,7 @@ Function Get-AWSFederationLogonUrl {
 			"SiginToken" : "UniqueStringHere"
 		}
 		#>
-		[PSCustomObject]$Response = Invoke-WebRequest -Uri $Url -Method Get | Select-Object -ExpandProperty Content | ConvertFrom-Json
+		[PSCustomObject]$Response = Invoke-WebRequest -Uri $Url -Method Get -UseBasicParsing | Select-Object -ExpandProperty Content | ConvertFrom-Json
 
 		# Set the issuer if it wasn't provided by the user
 		if ([System.String]::IsNullOrEmpty($Issuer))

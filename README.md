@@ -13,6 +13,9 @@ This example retrieves the user identities that ran DescribeInstances on the dat
 
 ## Revision History
 
+### 1.0.6.1
+Added support for server core, added UseBasicParsing to Invoke-WebRequest calls.
+
 ### 1.0.6.0
 Added a filtering capability to Get-EC2CurrentImageIds.
 
