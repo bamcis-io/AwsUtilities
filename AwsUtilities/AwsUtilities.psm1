@@ -1,4 +1,7 @@
-Import-Module -Name AWSPowerShell -ErrorAction Stop -Verbose:$false
+if ((Get-Module -Name AWSPowerShell) -eq $null)
+{
+	Import-Module -Name AWSPowerShell -ErrorAction Stop -Verbose:$false
+}
 
 $script:CREATED_BY = "CreatedBy"
 $script:CAN_BE_DELETED = "CanBeDeleted"
@@ -6949,7 +6952,7 @@ Function Get-AWSVpcEndpointsByLocation {
 
 		.NOTES
 			AUTHOR: Michael Haken
-			LAST UPDATE: 1/17/2019
+			LAST UPDATE: 8/8/2019
 	#>
     [CmdletBinding(DefaultParameterSetName="ByRegion")]
     Param(
@@ -7003,16 +7006,29 @@ Function Get-AWSVpcEndpointsByLocation {
         [System.String[]]$Regions =  Get-AWSRegion | Select-Object -ExpandProperty Region | Sort-Object
 		[System.Int32]$i = 0
 
-		$Regions | ForEach-Object {
-            $Region = $_
-
+		foreach ($Region in $Regions)
+		{
 			Write-Progress -Activity "Processing regions" -Status "Processing $Region" -PercentComplete ([System.Math]::Round(($i / $Regions.Length) * 100, 2)) 
 			$i++
                     
-            [System.String[]]$RegionAZs = Get-EC2AvailabilityZone -Region $Region @Splat | Select-Object -ExpandProperty ZoneName | Sort-Object
+			Write-Verbose -Message "Processing region: $Region"
 
-            Write-Verbose -Message "Processing region: $Region"
-        
+			try 
+			{
+				[System.String[]]$RegionAZs = Get-EC2AvailabilityZone -Region $Region @Splat | Select-Object -ExpandProperty ZoneName | Sort-Object
+			}
+			catch [Exception] 
+			{
+				Write-Warning -Message "Error processing AZs for $Region"
+				
+				# Can't continue processing this region since we need AZs, so skip it
+				if ($PSCmdlet.ParameterSetName -iin @("ByAZ", "ByRegionAndAZ"))
+				{
+					Write-Warning -Message "Skipping $Region for inclusion in results."
+					continue
+				}
+			}
+
             switch ($PSCmdlet.ParameterSetName)
             {
                 "ByRegion" {

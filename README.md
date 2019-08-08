@@ -13,6 +13,9 @@ This example retrieves the user identities that ran DescribeInstances on the dat
 
 ## Revision History
 
+### 1.0.6.2
+Added improved error handling for Get-AWSVpcEndpointsByLocation.
+
 ### 1.0.6.1
 Added support for server core, added UseBasicParsing to Invoke-WebRequest calls.
 
